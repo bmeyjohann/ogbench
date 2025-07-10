@@ -3,12 +3,16 @@
 import ogbench.locomaze
 import ogbench.manipspace
 import ogbench.powderworld
+import ogbench.ui
+import ogbench.wrappers
 from ogbench.utils import download_datasets, load_dataset, make_env_and_datasets
 
 __all__ = (
     'locomaze',
     'manipspace',
     'powderworld',
+    'ui',
+    'wrappers',
     'download_datasets',
     'load_dataset',
     'make_env_and_datasets',
