@@ -455,10 +455,15 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             return ob, reward, terminated, truncated, info
 
         def render(self):
-            if self.custom_renderer is None:
-                self.initialize_renderer()
-            self.custom_renderer.update_scene(self.data, camera=self.custom_camera)
-            return self.custom_renderer.render()
+            if self.render_mode == "human":
+                # Use the parent MujocoEnv's render method for window display
+                return super().render()
+            else:
+                # Use custom renderer for offscreen rendering
+                if self.custom_renderer is None:
+                    self.initialize_renderer()
+                self.custom_renderer.update_scene(self.data, camera=self.custom_camera)
+                return self.custom_renderer.render()
 
         def get_ob(self, ob_type=None):
             ob_type = self._ob_type if ob_type is None else ob_type

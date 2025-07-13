@@ -12,18 +12,41 @@ class PygameGamepad:
     """
     def __init__(self):
         pygame.init()
+        pygame.joystick.init()  # Explicitly initialize joystick subsystem
         self.has_joystick = False
+        
         try:
-            if pygame.joystick.get_count() > 0:
+            # Force refresh of joystick detection
+            pygame.joystick.quit()
+            pygame.joystick.init()
+            
+            joystick_count = pygame.joystick.get_count()
+            print(f"[DEBUG] Scanning for controllers... Found {joystick_count}")
+            
+            if joystick_count > 0:
+                # Try to initialize the first joystick
                 self.joy = pygame.joystick.Joystick(0)
                 self.joy.init()
                 self.has_joystick = True
-                print(f"[INFO] Detected Joystick: {self.joy.get_name()}")
+                
+                controller_name = self.joy.get_name()
+                print(f"[INFO] 🎮 Controller Connected: {controller_name}")
                 print(f"[INFO] Axes: {self.joy.get_numaxes()}, Buttons: {self.joy.get_numbuttons()}")
+                
+                # Special handling for Xbox 360 controllers
+                if 'xbox' in controller_name.lower() or '360' in controller_name.lower():
+                    print("[INFO] ✅ Xbox 360 controller detected!")
             else:
                 print("[INFO] No joystick detected. Will use keyboard fallback.")
-        except pygame.error:
-            print("[INFO] Joystick initialization failed. Will use keyboard fallback.")
+                print("[DEBUG] Try: lsusb | grep -i xbox")
+                print("[DEBUG] Or: ls /dev/input/js*")
+                
+        except pygame.error as e:
+            print(f"[INFO] Joystick initialization failed: {e}")
+            print("[INFO] Will use keyboard fallback.")
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}")
+            print("[INFO] Will use keyboard fallback.")
 
     def get_axes(self):
         """

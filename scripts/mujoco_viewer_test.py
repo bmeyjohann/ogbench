@@ -1,6 +1,11 @@
 import mujoco
 import numpy as np
 import imageio.v2 as imageio
+import os
+
+# Fix WSL window positioning issues
+os.environ['SDL_VIDEO_WINDOW_POS'] = '200,200'  # Force window position
+os.environ['SDL_VIDEO_CENTERED'] = '1'  # Center windows
 
 xml = """
 <mujoco>

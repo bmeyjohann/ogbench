@@ -10,6 +10,9 @@ import gymnasium as gym
 import numpy as np
 import os
 
+# Fix WSL window positioning issues
+os.environ['SDL_VIDEO_CENTERED'] = '1'  # Center windows
+
 # Import ogbench to register environments
 import ogbench
 
@@ -18,17 +21,7 @@ from ogbench.ui import TeleopPoint2D
 from ogbench.wrappers import DirectTeleopWrapper
 
 
-def test_rendering():
-    """Test if rendering is available."""
-    try:
-        # Try to create a simple test environment with rendering
-        env = gym.make('pointmaze-medium-v0', render_mode="human")
-        obs, info = env.reset()
-        env.close()
-        return True
-    except Exception as e:
-        print(f"Rendering test failed: {e}")
-        return False
+
 
 
 def main():
@@ -45,32 +38,9 @@ def main():
     
     print("=== OGBench Point Maze Teleoperation ===")
     
-    # Check if we're in WSL or have rendering issues
-    is_wsl = 'microsoft' in os.uname().release.lower()
-    if is_wsl:
-        print("⚠️  WSL detected - checking rendering capabilities...")
-    
-    # Test rendering
-    can_render = test_rendering()
-    
-    if not can_render:
-        print("❌ Visual rendering not available.")
-        print("This is common in WSL/headless environments.")
-        print("\n🔧 To fix rendering in WSL:")
-        print("1. Install an X server like VcXsrv or Xming")
-        print("2. Set DISPLAY environment variable: export DISPLAY=:0")
-        print("3. Or use headless mode (no visual feedback)")
-        
-        choice = input("\nContinue in headless mode? (y/n): ").lower().strip()
-        if choice != 'y':
-            print("Exiting. Fix rendering and try again.")
-            return
-        
-        render_mode = None
-        print("Running in headless mode - no visual feedback available.")
-    else:
-        render_mode = "human"
-        print("✅ Rendering available - visual mode enabled.")
+    # Use visual rendering mode
+    render_mode = "human"
+    print("🎯 Starting in visual mode...")
     
     print("\nAvailable environments:")
     for i, env_name in enumerate(available_envs):
@@ -90,12 +60,14 @@ def main():
     
     print(f"\nStarting {selected_env}...")
     
-    # Create the environment
+    # Create the environment with larger window
     try:
         env = gym.make(
             selected_env,
             render_mode=render_mode,
-            max_episode_steps=1000
+            max_episode_steps=1000,
+            width=800,
+            height=600
         )
     except Exception as e:
         print(f"Failed to create environment: {e}")
@@ -112,13 +84,10 @@ def main():
         # Print controls
         teleop_agent.print_controls()
         
-        if render_mode is None:
-            print("\n=== HEADLESS MODE ===")
-            print("No visual feedback available.")
-            print("Monitor console output for position/goal information.")
-        
-        print("Environment started. Navigate to the goal!")
-        print("Press Ctrl+C to exit.\n")
+        print("\n=== TELEOPERATION MODE ===")
+        print("🎮 You have full control of the agent!")
+        print("🎯 Navigate to the goal (shown in the visualization)")
+        print("❌ Press Ctrl+C to exit.\n")
         
         obs, info = env.reset()
         
