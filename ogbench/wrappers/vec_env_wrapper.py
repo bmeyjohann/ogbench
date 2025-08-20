@@ -1,36 +1,24 @@
 """
 Vectorized Environment Wrapper for OGBench environments.
 
-This wrapper creates multiple parallel environments using SubprocVecEnv
-while maintaining compatibility with RSL-RL's VecEnv interface.
+This wrapper extends RSL-RL's VecEnv to handle multiple OGBench environments
+internally, providing proper vectorization without external dependencies.
 """
 
 import torch
 import numpy as np
 import gymnasium as gym
-from gymnasium.vector import SubprocVecEnv
 from typing import Dict, Any, List, Callable
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
 
-def make_env_fn(env_name: str, wrappers: List[Callable] = None, **kwargs):
-    """Factory function to create a single environment with wrappers."""
-    def _make_env():
-        env = gym.make(env_name, **kwargs)
-        if wrappers:
-            for wrapper_fn in wrappers:
-                env = wrapper_fn(env)
-        return env
-    return _make_env
-
-
 class VectorizedOGBenchEnv(VecEnv):
     """
-    RSL-RL compatible vectorized environment wrapper.
+    RSL-RL VecEnv implementation for multiple OGBench environments.
     
-    Takes a single environment configuration and creates multiple parallel
-    instances using SubprocVecEnv for true multiprocessing.
+    Manages multiple environments internally and provides vectorized
+    step/reset functionality compatible with RSL-RL training.
     """
     
     def __init__(self, env_name: str, num_envs: int = 1, wrappers: List[Callable] = None, **env_kwargs):
@@ -42,38 +30,24 @@ class VectorizedOGBenchEnv(VecEnv):
             **env_kwargs: Additional arguments passed to gym.make()
         """
         self.env_name = env_name
-        self.num_envs = num_envs
         self.wrappers = wrappers or []
         self.env_kwargs = env_kwargs
         
-        # Create vectorized environment
-        if num_envs == 1:
-            # Single environment - no need for multiprocessing overhead
-            self.vec_env = gym.make(env_name, **env_kwargs)
-            if self.wrappers:
-                for wrapper_fn in self.wrappers:
-                    self.vec_env = wrapper_fn(self.vec_env)
-            # Wrap single env to look like vec env
-            self._is_single = True
-        else:
-            # Multiple environments - use SubprocVecEnv
-            env_fns = [make_env_fn(env_name, self.wrappers, **env_kwargs) 
-                      for _ in range(num_envs)]
-            self.vec_env = SubprocVecEnv(env_fns)
-            self._is_single = False
+        # Create individual environments
+        self.envs = []
+        for i in range(num_envs):
+            env = gym.make(env_name, **env_kwargs)
+            # Apply wrappers
+            for wrapper_fn in self.wrappers:
+                env = wrapper_fn(env)
+            self.envs.append(env)
         
         # Get environment properties from first environment
-        if self._is_single:
-            sample_env = self.vec_env
-        else:
-            # Create a temporary environment to get properties
-            temp_env = gym.make(env_name, **env_kwargs)
-            if self.wrappers:
-                for wrapper_fn in self.wrappers:
-                    temp_env = wrapper_fn(temp_env)
-            sample_env = temp_env
+        sample_env = self.envs[0]
         
-        # RSL-RL required attributes
+        # RSL-RL VecEnv required attributes
+        super().__init__()
+        self.num_envs = num_envs
         self.observation_space = sample_env.observation_space
         self.action_space = sample_env.action_space
         self.num_actions = self.action_space.shape[0]
@@ -92,24 +66,22 @@ class VectorizedOGBenchEnv(VecEnv):
         # Episode tracking buffer (required by RSL-RL)
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         
-        # Clean up temporary environment
-        if not self._is_single:
-            temp_env.close()
-        
         # Internal state
         self._last_obs = None
+        
+        # Reset all environments to initialize
+        self.reset()
     
     def reset(self):
         """Reset all environments and return initial observations."""
-        if self._is_single:
-            obs, info = self.vec_env.reset()
-            obs = np.expand_dims(obs, 0)  # Add batch dimension
-            infos = [info]
-        else:
-            obs, infos = self.vec_env.reset()
+        obs_list = []
+        for env in self.envs:
+            obs, info = env.reset()
+            obs_list.append(obs)
         
-        # Convert to torch tensor
-        obs_tensor = torch.from_numpy(obs).float().to(self.device)
+        # Stack observations
+        obs_array = np.stack(obs_list, axis=0)
+        obs_tensor = torch.from_numpy(obs_array).float().to(self.device)
         
         # Convert to TensorDict with proper structure for RSL-RL
         self._last_obs = TensorDict({
@@ -129,25 +101,26 @@ class VectorizedOGBenchEnv(VecEnv):
         else:
             actions_np = actions
         
-        # Handle single vs multiple environments
-        if self._is_single:
-            actions_np = actions_np.squeeze(0)  # Remove batch dimension
-            obs, reward, terminated, truncated, info = self.vec_env.step(actions_np)
-            
-            # Add batch dimensions back
-            obs = np.expand_dims(obs, 0)
-            reward = np.array([reward])
-            terminated = np.array([terminated])
-            truncated = np.array([truncated])
-            infos = [info]
-        else:
-            obs, rewards, terminateds, truncateds, infos = self.vec_env.step(actions_np)
-            reward = rewards
-            terminated = terminateds
-            truncated = truncateds
+        # Step each environment
+        obs_list = []
+        rewards_list = []
+        dones_list = []
+        infos_list = []
+        
+        for i, env in enumerate(self.envs):
+            obs, reward, terminated, truncated, info = env.step(actions_np[i])
+            obs_list.append(obs)
+            rewards_list.append(reward)
+            dones_list.append(terminated or truncated)
+            infos_list.append(info)
+        
+        # Convert to arrays
+        obs_array = np.stack(obs_list, axis=0)
+        rewards_array = np.array(rewards_list)
+        dones_array = np.array(dones_list)
         
         # Convert observations to torch tensors
-        obs_tensor = torch.from_numpy(obs).float().to(self.device)
+        obs_tensor = torch.from_numpy(obs_array).float().to(self.device)
         
         # Convert to TensorDict
         obs_tensordict = TensorDict({
@@ -157,8 +130,8 @@ class VectorizedOGBenchEnv(VecEnv):
         self._last_obs = obs_tensordict
         
         # Convert rewards and dones to torch tensors
-        rewards_tensor = torch.from_numpy(reward).float().to(self.device)
-        dones_tensor = torch.from_numpy(terminated | truncated).bool().to(self.device)
+        rewards_tensor = torch.from_numpy(rewards_array).float().to(self.device)
+        dones_tensor = torch.from_numpy(dones_array).bool().to(self.device)
         
         # Update episode length tracking
         self.episode_length_buf += 1
@@ -167,22 +140,42 @@ class VectorizedOGBenchEnv(VecEnv):
         # Create extras dict with episode information
         extras = {}
         
-        # Collect episode rewards from info dicts
+        # Collect episode rewards and detailed metrics from completed episodes
         episode_rewards = []
         episode_lengths = []
-        for i, info in enumerate(infos):
-            if isinstance(info, dict):
-                if 'episode' in info:
-                    episode_rewards.append(info['episode'].get('r', 0.0))
-                    episode_lengths.append(info['episode'].get('l', 0))
-                elif 'final_info' in info and info['final_info']:
-                    # Handle gymnasium's new episode info format
-                    episode_rewards.append(info.get('episode_reward', 0.0))
-                    episode_lengths.append(info.get('episode_length', 0))
+        sparse_rewards = []
+        dense_rewards = []
+        goals_reached = []
+        distances = []
         
+        for i, (done, info) in enumerate(zip(dones_array, infos_list)):
+            if done and isinstance(info, dict):
+                # Use cumulative episode reward from DetailedRewardWrapper
+                total_episode_reward = info.get('episode_sparse_reward', 0.0) + info.get('episode_dense_reward', 0.0)
+                episode_rewards.append(total_episode_reward)
+                episode_lengths.append(self.episode_length_buf[i].item())
+                
+                # Detailed reward wrapper metrics (if available)
+                if 'episode_sparse_reward' in info:
+                    sparse_rewards.append(info['episode_sparse_reward'])
+                if 'episode_dense_reward' in info:
+                    dense_rewards.append(info['episode_dense_reward'])
+                if 'goal_reached' in info:
+                    goals_reached.append(info['goal_reached'])
+                if 'distance_to_goal' in info:
+                    distances.append(info['distance_to_goal'])
+        
+        # Add episode completion metrics to extras
         if episode_rewards:
             extras['episode_rewards'] = episode_rewards
             extras['episode_lengths'] = episode_lengths
+        
+        # Add detailed metrics to extras if available
+        if sparse_rewards:
+            extras['episode_sparse_rewards'] = sparse_rewards
+            extras['episode_dense_rewards'] = dense_rewards
+            extras['goals_reached'] = goals_reached
+            extras['distances_to_goal'] = distances
         
         return obs_tensordict, rewards_tensor, dones_tensor, extras
     
@@ -192,5 +185,6 @@ class VectorizedOGBenchEnv(VecEnv):
     
     def close(self):
         """Close all environments."""
-        if hasattr(self.vec_env, 'close'):
-            self.vec_env.close()
+        for env in self.envs:
+            if hasattr(env, 'close'):
+                env.close()
