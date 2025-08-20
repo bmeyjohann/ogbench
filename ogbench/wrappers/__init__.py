@@ -1,6 +1,8 @@
 from .intervention_wrappers import HumanInterventionWrapper, DirectTeleopWrapper
 from .speed_wrapper import SpeedWrapper
 from .goal_conditioned_wrapper import GoalConditionedWrapper, RelativeGoalWrapper
+from .flexible_obs_wrapper import FlexibleObsWrapper
+from .reward_wrapper import DetailedRewardWrapper
 
 __all__ = [
     'HumanInterventionWrapper', 
@@ -8,4 +10,6 @@ __all__ = [
     'SpeedWrapper',
     'GoalConditionedWrapper',
     'RelativeGoalWrapper',
+    'FlexibleObsWrapper',
+    'DetailedRewardWrapper',
 ] 
