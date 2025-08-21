@@ -79,8 +79,8 @@ class FlexibleObsWrapper(gym.ObservationWrapper):
         if self.include_direction: components.append('direction')
         if self.include_velocity: components.append('velocity')
         
-        print(f"FlexibleObsWrapper: Obs space {env.observation_space.shape} -> {self.observation_space.shape}")
-        print(f"   Components: {', '.join(components)}")
+        # print(f"FlexibleObsWrapper: Obs space {env.observation_space.shape} -> {self.observation_space.shape}")
+        # print(f"   Components: {', '.join(components)}")
     
     def observation(self, obs):
         """Convert observation to flexible format."""

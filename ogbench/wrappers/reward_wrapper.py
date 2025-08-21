@@ -24,7 +24,7 @@ class DetailedRewardWrapper(gym.RewardWrapper):
     
     def __init__(self, env, 
                  reward_type='sparse',
-                 dense_reward_scale=0.01,
+                 dense_reward_scale=0.1,
                  goal_reward=1.0,
                  step_penalty=0.0):
         """
