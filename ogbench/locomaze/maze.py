@@ -301,42 +301,59 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
 
         def set_tasks(self):
             # `tasks` is a list of tasks, where each task is a list of two tuples: (init_ij, goal_ij).
-            if self._maze_type == 'arena':
-                tasks = [
-                    [(1, 1), (6, 6)],
-                ]
-            elif self._maze_type == 'medium':
-                tasks = [
-                    [(1, 1), (6, 6)],
-                    [(6, 1), (1, 6)],
-                    [(5, 3), (4, 2)],
-                    [(6, 5), (6, 1)],
-                    [(2, 6), (1, 1)],
-                ]
-            elif self._maze_type == 'large':
-                tasks = [
-                    [(1, 1), (7, 10)],
-                    [(5, 4), (7, 1)],
-                    [(7, 4), (1, 10)],
-                    [(3, 8), (5, 4)],
-                    [(1, 1), (5, 4)],
-                ]
-            elif self._maze_type == 'giant':
-                tasks = [
-                    [(1, 1), (10, 14)],
-                    [(1, 14), (10, 1)],
-                    [(8, 14), (1, 1)],
-                    [(8, 3), (5, 12)],
-                    [(5, 9), (3, 8)],
-                ]
-            elif self._maze_type == 'teleport':
-                tasks = [
-                    [(1, 10), (7, 1)],
-                    [(1, 1), (7, 10)],
-                    [(5, 6), (7, 10)],
-                    [(7, 1), (7, 10)],
-                    [(5, 6), (7, 1)],
-                ]
+            if self._maze_type in ('arena', 'medium', 'large', 'giant', 'teleport'):
+                tasks = []
+                for i in range(self.maze_map.shape[0]):
+                    for j in range(self.maze_map.shape[1]):
+                        if self.maze_map[i, j] == 0:
+                            for k in range(self.maze_map.shape[0]):
+                                for l in range(self.maze_map.shape[1]):
+                                    if self.maze_map[k, l] == 0:
+                                        if (i, j) != (k, l):
+                                            tasks.append([(i, j), (k, l)])
+            
+            # if self._maze_type == 'arena':
+            #     # Init spawn and goal randomized over entire arena.
+            #     tasks = []
+            #     for i in range(1, 6):
+            #         for j in range(1, 6):
+            #             for k in range(1, 6):
+            #                 for l in range(1, 6):
+            #                     if (i, j) != (k, l):
+            #                         tasks.append([(i, j), (k, l)])
+            #     # tasks = [[(1, 1), (6, 6)]]
+            # elif self._maze_type == 'medium':
+            #     tasks = [
+            #         [(1, 1), (6, 6)],
+            #         [(6, 1), (1, 6)],
+            #         [(5, 3), (4, 2)],
+            #         [(6, 5), (6, 1)],
+            #         [(2, 6), (1, 1)],
+            #     ]
+            # elif self._maze_type == 'large':
+            #     tasks = [
+            #         [(1, 1), (7, 10)],
+            #         [(5, 4), (7, 1)],
+            #         [(7, 4), (1, 10)],
+            #         [(3, 8), (5, 4)],
+            #         [(1, 1), (5, 4)],
+            #     ]
+            # elif self._maze_type == 'giant':
+            #     tasks = [
+            #         [(1, 1), (10, 14)],
+            #         [(1, 14), (10, 1)],
+            #         [(8, 14), (1, 1)],
+            #         [(8, 3), (5, 12)],
+            #         [(5, 9), (3, 8)],
+            #     ]
+            # elif self._maze_type == 'teleport':
+            #     tasks = [
+            #         [(1, 10), (7, 1)],
+            #         [(1, 1), (7, 10)],
+            #         [(5, 6), (7, 10)],
+            #         [(7, 1), (7, 10)],
+            #         [(5, 6), (7, 1)],
+            #     ]
             else:
                 raise ValueError(f'Unknown maze type: {self._maze_type}')
 

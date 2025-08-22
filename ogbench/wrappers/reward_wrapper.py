@@ -54,8 +54,6 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self._episode_dense_reward = 0.0
         self._episode_steps = 0
         self._goal_reached = False
-        
-        print(f"DetailedRewardWrapper: reward_type={reward_type}, dense_scale={dense_reward_scale}")
     
     def _extract_positions(self, obs):
         """Extract agent and goal positions from observation."""
@@ -139,13 +137,15 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         
         # Return reward based on type
         if self.reward_type == 'sparse':
-            total_reward = sparse_reward + step_reward
+            dense_reward = 0.0
         elif self.reward_type == 'dense':
-            total_reward = dense_reward + step_reward
+            sparse_reward = 0.0
         elif self.reward_type == 'combined':
-            total_reward = sparse_reward + dense_reward + step_reward
+            pass
         else:
             raise ValueError(f"Unknown reward_type: {self.reward_type}")
+        
+        total_reward = sparse_reward + dense_reward + step_reward
         
         return total_reward
     
