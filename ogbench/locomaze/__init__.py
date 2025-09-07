@@ -23,6 +23,51 @@ register(
     ),
 )
 register(
+    id='pointmaze-arena-danger-floor-v0',
+    entry_point='ogbench.locomaze.maze:make_maze_env',
+    max_episode_steps=500,
+    kwargs=dict(
+        loco_env_type='point',
+        maze_env_type='maze',
+        maze_type='arena_danger',
+        dangerous_state_mode='floor',
+    ),
+)
+register(
+    id='pointmaze-arena-danger-sticky-v0',
+    entry_point='ogbench.locomaze.maze:make_maze_env',
+    max_episode_steps=500,
+    kwargs=dict(
+        loco_env_type='point',
+        maze_env_type='maze',
+        maze_type='arena_danger',
+        dangerous_state_mode='sticky',
+        dangerous_sticky_action_scale=0.5,
+    ),
+)
+register(
+    id='pointmaze-arena-danger-wall-v0',
+    entry_point='ogbench.locomaze.maze:make_maze_env',
+    max_episode_steps=500,
+    kwargs=dict(
+        loco_env_type='point',
+        maze_env_type='maze',
+        maze_type='arena_danger',
+        dangerous_state_mode='wall',
+    ),
+)
+register(
+    id='pointmaze-arena-danger-lethal-v0',
+    entry_point='ogbench.locomaze.maze:make_maze_env',
+    max_episode_steps=500,
+    kwargs=dict(
+        loco_env_type='point',
+        maze_env_type='maze',
+        maze_type='arena_danger',
+        dangerous_state_mode='lethal',
+    ),
+)
+register(
     id='pointmaze-medium-v0',
     entry_point='ogbench.locomaze.maze:make_maze_env',
     max_episode_steps=1000,

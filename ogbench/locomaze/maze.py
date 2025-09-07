@@ -44,6 +44,12 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             add_noise_to_goal=True,
             reward_task_id=None,
             use_oracle_rep=False,
+            # Dangerous state configuration
+            dangerous_tile_id: int = 2,
+            dangerous_state_mode: str = 'floor',  # one of: 'floor', 'wall', 'sticky', 'lethal'
+            dangerous_marker_rgba=(1.0, 0.25, 0.25, 1.0),
+            dangerous_invisible_wall_rgba=(1.0, 0.0, 0.0, 0.0),
+            dangerous_sticky_action_scale: float = 0.5,
             *args,
             **kwargs,
         ):
@@ -72,6 +78,14 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             self._reward_task_id = reward_task_id
             self._use_oracle_rep = use_oracle_rep
             assert ob_type in ['states', 'pixels']
+
+            # Dangerous state config
+            self._dangerous_tile_id = int(dangerous_tile_id)
+            self._dangerous_state_mode = str(dangerous_state_mode)
+            assert self._dangerous_state_mode in ['floor', 'wall', 'sticky', 'lethal']
+            self._dangerous_marker_rgba = tuple(dangerous_marker_rgba)
+            self._dangerous_invisible_wall_rgba = tuple(dangerous_invisible_wall_rgba)
+            self._dangerous_sticky_action_scale = float(dangerous_sticky_action_scale)
 
             # Define constants.
             self._offset_x = 4
@@ -153,6 +167,18 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 self._teleport_info['teleport_out_xys'] = [
                     self.ij_to_xy(ij) for ij in self._teleport_info['teleport_out_ijs']
                 ]
+            elif self._maze_type == 'arena_danger':
+                # Arena layout with a central 2x2 block of dangerous tiles (ID 2)
+                maze_map = [
+                    [1, 1, 1, 1, 1, 1, 1, 1],
+                    [1, 0, 0, 0, 0, 0, 0, 1],
+                    [1, 0, 0, 0, 0, 0, 0, 1],
+                    [1, 0, 0, 2, 2, 0, 0, 1],
+                    [1, 0, 0, 2, 2, 0, 0, 1],
+                    [1, 0, 0, 0, 0, 0, 0, 1],
+                    [1, 0, 0, 0, 0, 0, 0, 1],
+                    [1, 1, 1, 1, 1, 1, 1, 1],
+                ]
             else:
                 raise ValueError(f'Unknown maze type: {self._maze_type}')
 
@@ -215,7 +241,25 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             """Update the XML tree to include the maze."""
             worldbody = tree.find('.//worldbody')
 
-            # Add walls.
+            # Ensure materials for dangerous states exist in asset.
+            asset = tree.find('.//asset')
+            if asset is not None:
+                # Helper to ensure a material exists
+                def ensure_material(name, rgba_str=None, texture=None):
+                    mat = tree.find(f'.//material[@name="{name}"]')
+                    if mat is None:
+                        kwargs = {}
+                        if rgba_str is not None:
+                            kwargs['rgba'] = rgba_str
+                        if texture is not None:
+                            kwargs['texture'] = texture
+                        ET.SubElement(asset, 'material', name=name, **kwargs)
+
+                rgba_to_str = lambda rgba: f"{rgba[0]} {rgba[1]} {rgba[2]} {rgba[3]}"
+                ensure_material('danger_marker', rgba_to_str(self._dangerous_marker_rgba))
+                ensure_material('invisible', rgba_to_str(self._dangerous_invisible_wall_rgba))
+
+            # Add walls and special tiles.
             for i in range(self.maze_map.shape[0]):
                 for j in range(self.maze_map.shape[1]):
                     struct = self.maze_map[i, j]
@@ -231,6 +275,34 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                             conaffinity='1',
                             material='wall',
                         )
+                    elif struct == self._dangerous_tile_id:
+                        # Always add a visible non-colliding marker at ground level (square box overlay).
+                        ET.SubElement(
+                            worldbody,
+                            'geom',
+                            name=f'danger_marker_{i}_{j}',
+                            type='box',
+                            size=f'{self._maze_unit / 2 * 0.95} {self._maze_unit / 2 * 0.95} 0.01',
+                            pos=f'{j * self._maze_unit - self._offset_x} {i * self._maze_unit - self._offset_y} 0.02',
+                            material='danger_marker',
+                            contype='0',
+                            conaffinity='0',
+                            priority='2',
+                        )
+
+                        # In 'wall' mode add an invisible colliding box to block passage.
+                        if self._dangerous_state_mode == 'wall':
+                            ET.SubElement(
+                                worldbody,
+                                'geom',
+                                name=f'danger_block_{i}_{j}',
+                                pos=f'{j * self._maze_unit - self._offset_x} {i * self._maze_unit - self._offset_y} {self._maze_height / 2 * self._maze_unit}',
+                                size=f'{self._maze_unit / 2} {self._maze_unit / 2} {self._maze_height / 2 * self._maze_unit}',
+                                type='box',
+                                contype='1',
+                                conaffinity='1',
+                                material='invisible',
+                            )
 
             # Adjust floor size.
             center_x, center_y = 2 * (self.maze_map.shape[1] - 3), 2 * (self.maze_map.shape[0] - 3)
@@ -270,6 +342,11 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 # Color wall.
                 wall = tree.find('.//material[@name="wall"]')
                 wall.set('rgba', '.6 .6 .6 1')
+                # Ensure dangerous marker vivid color for pixels.
+                danger_marker = tree.find('.//material[@name="danger_marker"]')
+                if danger_marker is not None:
+                    rgba = self._dangerous_marker_rgba
+                    danger_marker.set('rgba', f'{rgba[0]} {rgba[1]} {rgba[2]} {rgba[3]}')
                 # Remove ambient light.
                 light = tree.find('.//light[@name="global"]')
                 light.attrib.pop('ambient')
@@ -299,9 +376,23 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                     conaffinity='0',
                 )
 
+        def is_traversable(self, i, j):
+            if not (0 <= i < self.maze_map.shape[0] and 0 <= j < self.maze_map.shape[1]):
+                return False
+            struct = self.maze_map[i, j]
+            if struct == 0:
+                return True
+            if struct == 1:
+                return False
+            if struct == self._dangerous_tile_id:
+                # Traversable for floor and sticky; not for wall or lethal
+                return self._dangerous_state_mode in ('floor', 'sticky')
+            # Unknown tiles default to non-traversable
+            return False
+
         def set_tasks(self):
             # `tasks` is a list of tasks, where each task is a list of two tuples: (init_ij, goal_ij).
-            if self._maze_type in ('arena', 'medium', 'large', 'giant', 'teleport'):
+            if self._maze_type in ('arena', 'medium', 'large', 'giant', 'teleport', 'arena_danger'):
                 tasks = []
                 for i in range(self.maze_map.shape[0]):
                     for j in range(self.maze_map.shape[1]):
@@ -442,6 +533,16 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             return ob, info
 
         def step(self, action):
+            # Apply sticky effect by scaling action if currently on dangerous tile and mode is sticky.
+            cur_i, cur_j = self.xy_to_ij(self.get_xy())
+            if (
+                0 <= cur_i < self.maze_map.shape[0]
+                and 0 <= cur_j < self.maze_map.shape[1]
+                and self.maze_map[cur_i, cur_j] == self._dangerous_tile_id
+                and self._dangerous_state_mode == 'sticky'
+            ):
+                action = action * self._dangerous_sticky_action_scale
+
             ob, reward, terminated, truncated, info = super().step(action)
 
             if self._teleport_info is not None:
@@ -455,15 +556,29 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                         self.set_xy(np.array(teleport_out_xy))
                         break
 
-            # Check if the agent has reached the goal.
-            if np.linalg.norm(self.get_xy() - self.cur_goal_xy) <= self._goal_tol:
+            # Lethal check: if the agent is on a lethal tile, terminate episode with -1 reward.
+            if self._dangerous_state_mode == 'lethal':
+                li, lj = self.xy_to_ij(self.get_xy())
+                if (
+                    0 <= li < self.maze_map.shape[0]
+                    and 0 <= lj < self.maze_map.shape[1]
+                    and self.maze_map[li, lj] == self._dangerous_tile_id
+                ):
+                    terminated = True
+                    info['killed'] = 1.0
+                    reward = -1.0
+
+            # Check if the agent has reached the goal (only if not already terminated by lethal tile).
+            if not terminated and np.linalg.norm(self.get_xy() - self.cur_goal_xy) <= self._goal_tol:
                 if self._terminate_at_goal:
                     terminated = True
                 info['success'] = 1.0
                 reward = 1.0
             else:
                 info['success'] = 0.0
-                reward = 0.0
+                # Preserve reward if lethal already set it to -1.
+                if reward is None or reward >= 0.0:
+                    reward = 0.0
 
             # If the environment is in the single-task mode, modify the reward.
             if self._reward_task_id is not None:
@@ -534,7 +649,7 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                     if (
                         0 <= ni < self.maze_map.shape[0]
                         and 0 <= nj < self.maze_map.shape[1]
-                        and self.maze_map[ni, nj] == 0
+                        and self.is_traversable(ni, nj)
                         and bfs_map[ni, nj] == -1
                     ):
                         bfs_map[ni][nj] = bfs_map[i][j] + 1
@@ -547,7 +662,7 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 if (
                     0 <= ni < self.maze_map.shape[0]
                     and 0 <= nj < self.maze_map.shape[1]
-                    and self.maze_map[ni, nj] == 0
+                    and self.is_traversable(ni, nj)
                     and bfs_map[ni, nj] < bfs_map[subgoal_ij[0], subgoal_ij[1]]
                 ):
                     subgoal_ij = (ni, nj)
