@@ -22,11 +22,17 @@ class DetailedRewardWrapper(gym.RewardWrapper):
     - combined: sparse + dense_weight * dense
     """
     
-    def __init__(self, env, 
+    def __init__(self, env,
                  reward_type='sparse',
                  dense_reward_scale=0.1,
                  goal_reward=1.0,
-                 step_penalty=0.0):
+                 step_penalty=0.0,
+                 # Subgoal shaping (reward-only) options
+                 use_subgoal_shaping: bool = False,
+                 subgoal_shaping_coef: float = 1.0,
+                 subgoal_shaping_gamma: float = 0.99,
+                 curriculum_stage1_steps_per_env: int = 0,
+                 log_subgoal_metrics: bool = True):
         """
         Initialize the detailed reward wrapper.
         
@@ -43,17 +49,38 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self.dense_reward_scale = dense_reward_scale
         self.goal_reward = goal_reward
         self.step_penalty = step_penalty
-        
+
+        # Subgoal shaping configuration
+        self.use_subgoal_shaping = use_subgoal_shaping
+        self.subgoal_shaping_coef = float(subgoal_shaping_coef)
+        self.subgoal_shaping_gamma = float(subgoal_shaping_gamma)
+        self.curriculum_stage1_steps_per_env = int(curriculum_stage1_steps_per_env or 0)
+        self.log_subgoal_metrics = log_subgoal_metrics
+
         # Track previous position for dense reward calculation
         self._prev_agent_pos = None
         self._goal_pos = None
         self._prev_distance = None
-        
+
+        # Subgoal shaping internals
+        self._prev_potential = None  # Phi(s_{t-1}) wrt active subgoal
+        self._last_active_subgoal = None  # cache last subgoal position for logging
+        self._last_subgoal_index = None
+        self._global_step_env = 0  # per-env step counter for curriculum cutoff
+
         # Episode statistics
         self._episode_sparse_reward = 0.0
         self._episode_dense_reward = 0.0
         self._episode_steps = 0
         self._goal_reached = False
+        # Subgoal logs
+        self._episode_subgoal_shaping_return = 0.0
+        self._episode_subgoal_distance_sum = 0.0
+        self._episode_subgoal_steps = 0
+        self._episode_subgoal_transitions = 0
+        # Per-step bookkeeping for logging
+        self._last_dense_reward_step = 0.0
+        self._last_sparse_reward_step = 0.0
     
     def _extract_positions(self, obs):
         """Extract agent and goal positions from observation."""
@@ -77,13 +104,24 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         
         # Calculate initial distance
         self._prev_distance = np.linalg.norm(self._goal_pos - self._prev_agent_pos)
-        
+
+        # Reset curriculum counter at episode start only if first episode
+        # (we keep a global per-env counter across episodes)
+        # Initialize subgoal potential
+        self._prev_potential = None
+        self._last_active_subgoal = None
+        self._last_subgoal_index = None
+
         # Reset episode tracking
         self._episode_sparse_reward = 0.0
         self._episode_dense_reward = 0.0
         self._episode_steps = 0
         self._goal_reached = False
-        
+        self._episode_subgoal_shaping_return = 0.0
+        self._episode_subgoal_distance_sum = 0.0
+        self._episode_subgoal_steps = 0
+        self._episode_subgoal_transitions = 0
+
         # Add initial metrics to info
         info.update({
             'episode_sparse_reward': self._episode_sparse_reward,
@@ -92,7 +130,22 @@ class DetailedRewardWrapper(gym.RewardWrapper):
             'goal_reached': self._goal_reached,
             'distance_to_goal': self._prev_distance,
         })
-        
+
+        if self.log_subgoal_metrics:
+            # Compute initial subgoal (if API available)
+            subgoal_xy, subgoal_index = self._get_active_subgoal(self._prev_agent_pos, self._goal_pos)
+            if subgoal_xy is not None:
+                self._last_active_subgoal = subgoal_xy
+                self._last_subgoal_index = subgoal_index
+                dist_to_subgoal = float(np.linalg.norm(subgoal_xy - self._prev_agent_pos))
+                self._prev_potential = -dist_to_subgoal
+                self._episode_subgoal_distance_sum += dist_to_subgoal
+                self._episode_subgoal_steps += 1
+                info.update({
+                    'distance_to_subgoal': dist_to_subgoal,
+                    'subgoal_index': subgoal_index if subgoal_index is not None else -1,
+                })
+
         return obs, info
     
     def reward(self, reward):
@@ -109,17 +162,48 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         
         # Calculate current distance
         current_distance = np.linalg.norm(current_goal_pos - current_agent_pos)
-        
+
         # Calculate rewards
         sparse_reward = float(reward)  # Original reward (1.0 for goal, 0.0 otherwise)
-        
-        # Dense reward based on distance progress
-        if self._prev_distance is not None:
-            distance_progress = self._prev_distance - current_distance
-            dense_reward = distance_progress * self.dense_reward_scale
-        else:
-            dense_reward = 0.0
-        
+        dense_reward = 0.0
+
+        # Dense reward based on either classic distance progress (to final goal)
+        # or potential-based shaping to oracle subgoal (reward-only subgoals)
+        if self.reward_type in ('dense', 'combined'):
+            if self.use_subgoal_shaping and self._is_stage1_enabled():
+                # Potential-based shaping towards active subgoal
+                subgoal_xy, subgoal_index = self._get_active_subgoal(current_agent_pos, current_goal_pos)
+                if subgoal_xy is not None:
+                    # Track subgoal transitions for logging
+                    if self._last_active_subgoal is not None:
+                        if np.linalg.norm(self._last_active_subgoal - subgoal_xy) > 1e-6:
+                            self._episode_subgoal_transitions += 1
+                    self._last_active_subgoal = subgoal_xy
+                    self._last_subgoal_index = subgoal_index
+
+                    # Compute potential difference
+                    prev_pos = self._prev_agent_pos if self._prev_agent_pos is not None else current_agent_pos
+                    phi_prev = self._prev_potential if self._prev_potential is not None else -np.linalg.norm(subgoal_xy - prev_pos)
+                    phi_curr = -np.linalg.norm(subgoal_xy - current_agent_pos)
+                    shaping = self.subgoal_shaping_coef * (self.subgoal_shaping_gamma * phi_curr - phi_prev)
+                    dense_reward = float(shaping)
+                    self._prev_potential = phi_curr
+
+                    # Per-step logging accumulators
+                    self._episode_subgoal_shaping_return += dense_reward
+                    self._episode_subgoal_distance_sum += float(np.linalg.norm(subgoal_xy - current_agent_pos))
+                    self._episode_subgoal_steps += 1
+                else:
+                    # Fallback to classic dense in case API unavailable
+                    if self._prev_distance is not None:
+                        distance_progress = self._prev_distance - current_distance
+                        dense_reward = distance_progress * self.dense_reward_scale
+            else:
+                # Classic dense progress to final goal
+                if self._prev_distance is not None:
+                    distance_progress = self._prev_distance - current_distance
+                    dense_reward = distance_progress * self.dense_reward_scale
+
         # Step penalty
         step_reward = -self.step_penalty
         
@@ -144,9 +228,13 @@ class DetailedRewardWrapper(gym.RewardWrapper):
             pass
         else:
             raise ValueError(f"Unknown reward_type: {self.reward_type}")
-        
+
         total_reward = sparse_reward + dense_reward + step_reward
-        
+
+        # Save step-level components for logging
+        self._last_sparse_reward_step = sparse_reward
+        self._last_dense_reward_step = dense_reward
+
         return total_reward
     
     def step(self, action):
@@ -163,11 +251,13 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         except:
             current_distance = self._prev_distance if self._prev_distance is not None else 0.0
         
+        # Curriculum bookkeeping (per-env global step)
+        self._global_step_env += 1
+
         # Update info with detailed metrics
         info.update({
             'sparse_reward': float(reward),  # Original reward
-            'dense_reward': (self._episode_dense_reward - (self._episode_dense_reward - 
-                           (self._prev_distance - current_distance) * self.dense_reward_scale)),
+            'dense_reward': float(self._last_dense_reward_step),
             'total_reward': detailed_reward,
             'episode_sparse_reward': self._episode_sparse_reward,
             'episode_dense_reward': self._episode_dense_reward,
@@ -176,8 +266,66 @@ class DetailedRewardWrapper(gym.RewardWrapper):
             'distance_to_goal': current_distance,
             'reward_type': self.reward_type,
         })
-        
+
+        # Subgoal metrics in info (for logging only, not observed by policy)
+        if self.log_subgoal_metrics:
+            subgoal_xy, subgoal_index = self._last_active_subgoal, self._last_subgoal_index
+            if subgoal_xy is None:
+                # Try to compute once here if not available yet
+                agent_pos = obs[:2] if isinstance(obs, np.ndarray) and obs.shape[0] >= 2 else self._prev_agent_pos
+                goal_pos = obs[2:4] if isinstance(obs, np.ndarray) and obs.shape[0] >= 4 else self._goal_pos
+                sg, idx = self._get_active_subgoal(agent_pos, goal_pos)
+                subgoal_xy, subgoal_index = sg, idx
+                if sg is not None and self._prev_potential is None:
+                    self._prev_potential = -float(np.linalg.norm(sg - agent_pos))
+            if subgoal_xy is not None:
+                info.update({
+                    'distance_to_subgoal': float(np.linalg.norm(subgoal_xy - (obs[:2] if isinstance(obs, np.ndarray) else self._prev_agent_pos))),
+                    'subgoal_index': subgoal_index if subgoal_index is not None else -1,
+                    'subgoal_shaping_coef': float(self.subgoal_shaping_coef if self._is_stage1_enabled() and self.use_subgoal_shaping else 0.0),
+                    'curriculum_stage': 1 if (self._is_stage1_enabled() and self.use_subgoal_shaping) else 2,
+                })
+
+        # If episode ended, flush episode-level subgoal stats
+        if terminated or truncated:
+            if self._episode_subgoal_steps > 0:
+                info.update({
+                    'episode_avg_distance_to_subgoal': self._episode_subgoal_distance_sum / max(1, self._episode_subgoal_steps),
+                    'episode_subgoal_shaping_return': self._episode_subgoal_shaping_return,
+                    'episode_subgoal_transitions': self._episode_subgoal_transitions,
+                })
+
         return obs, detailed_reward, terminated, truncated, info
+
+    # -----------------
+    # Helper functions
+    # -----------------
+    def _get_active_subgoal(self, agent_xy: np.ndarray, goal_xy: np.ndarray):
+        """Query the base env for the oracle subgoal. Returns (subgoal_xy, index_or_none).
+
+        Falls back to None if API not available.
+        """
+        try:
+            # Gymnasium wrappers expose base env via .unwrapped
+            sg = self.unwrapped.get_oracle_subgoal(agent_xy, goal_xy)
+            if isinstance(sg, (list, tuple)) and len(sg) >= 1:
+                subgoal_xy = np.array(sg[0], dtype=np.float32)
+                index = sg[1] if len(sg) > 1 else None
+                return subgoal_xy, index
+            elif sg is not None:
+                subgoal_xy = np.array(sg, dtype=np.float32)
+                return subgoal_xy, None
+        except Exception:
+            pass
+        return None, None
+
+    def _is_stage1_enabled(self) -> bool:
+        """Return True if curriculum Stage 1 (with shaping) is active for this env instance."""
+        if not self.use_subgoal_shaping:
+            return False
+        if self.curriculum_stage1_steps_per_env <= 0:
+            return True
+        return self._global_step_env < self.curriculum_stage1_steps_per_env
 
 
 def test_reward_wrapper():

@@ -215,6 +215,9 @@ class VectorizedOGBenchEnv(VecEnv):
         dense_rewards = []
         goals_reached = []
         distances = []
+        subgoal_avgs = []
+        subgoal_returns = []
+        subgoal_transitions = []
         
         # First pass: collect episode completion data before any resets
         for i, (done, info) in enumerate(zip(dones_array, infos_list)):
@@ -242,6 +245,12 @@ class VectorizedOGBenchEnv(VecEnv):
                     goals_reached.append(info['goal_reached'])
                 if 'distance_to_goal' in info:
                     distances.append(info['distance_to_goal'])
+                if 'episode_avg_distance_to_subgoal' in info:
+                    subgoal_avgs.append(info['episode_avg_distance_to_subgoal'])
+                if 'episode_subgoal_shaping_return' in info:
+                    subgoal_returns.append(info['episode_subgoal_shaping_return'])
+                if 'episode_subgoal_transitions' in info:
+                    subgoal_transitions.append(info['episode_subgoal_transitions'])
         
         # Create extras dict following Isaac Lab's format
         extras = {"observations": self._current_obs_dict}
@@ -268,6 +277,12 @@ class VectorizedOGBenchEnv(VecEnv):
             extras['log']['/Episode/final_distance'] = torch.tensor(distances, device=self.device)
             extras['log']['/Episode/sparse_reward'] = torch.tensor(sparse_rewards, device=self.device)
             extras['log']['/Episode/dense_reward'] = torch.tensor(dense_rewards, device=self.device)
+            if subgoal_avgs:
+                extras['log']['/Episode/avg_distance_to_subgoal'] = torch.tensor(subgoal_avgs, device=self.device)
+            if subgoal_returns:
+                extras['log']['/Episode/subgoal_shaping_return'] = torch.tensor(subgoal_returns, device=self.device)
+            if subgoal_transitions:
+                extras['log']['/Episode/subgoal_transitions'] = torch.tensor(subgoal_transitions, device=self.device)
         
         # Return TensorDict for observations
         obs_tensordict = TensorDict(
