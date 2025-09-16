@@ -667,6 +667,8 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 ):
                     subgoal_ij = (ni, nj)
             subgoal_xy = self.ij_to_xy(subgoal_ij)
+            if subgoal_ij == goal_ij:
+                subgoal_xy = goal_xy
             return np.array(subgoal_xy), bfs_map
 
         def xy_to_ij(self, xy):
