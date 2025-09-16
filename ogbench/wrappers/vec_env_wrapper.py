@@ -270,6 +270,37 @@ class VectorizedOGBenchEnv(VecEnv):
         
         # Create extras dict following Isaac Lab's format
         extras = {"observations": self._current_obs_dict}
+
+        # Compute applied/student/teacher actions per env (teacher override if intervened, else student/policy action)
+        applied_actions = []
+        student_actions = []
+        teacher_actions = []
+        teacher_intervened_mask = []
+        for i, info in enumerate(infos_list):
+            info_dict = info if isinstance(info, dict) else {}
+            teacher_intervened = bool(info_dict.get('teacher_intervened', False))
+            teacher_intervened_mask.append(teacher_intervened)
+
+            student_action = info_dict.get('student_action')
+            if student_action is None:
+                student_action = actions_np[i]
+            student_actions.append(np.asarray(student_action, dtype=np.float32))
+
+            teacher_action = info_dict.get('teacher_action')
+            if teacher_action is None:
+                teacher_action = student_action
+            teacher_actions.append(np.asarray(teacher_action, dtype=np.float32))
+
+            if teacher_intervened:
+                applied_actions.append(np.asarray(teacher_action, dtype=np.float32))
+            else:
+                applied_actions.append(np.asarray(student_action, dtype=np.float32))
+
+        if applied_actions:
+            extras['applied_actions'] = torch.tensor(np.stack(applied_actions, axis=0), device=self.device, dtype=torch.float32)
+            extras['student_actions'] = torch.tensor(np.stack(student_actions, axis=0), device=self.device, dtype=torch.float32)
+            extras['teacher_actions'] = torch.tensor(np.stack(teacher_actions, axis=0), device=self.device, dtype=torch.float32)
+            extras['teacher_intervened_mask'] = torch.tensor(teacher_intervened_mask, device=self.device, dtype=torch.bool)
         
         # Add episode completion metrics to extras
         if episode_rewards:
@@ -310,6 +341,10 @@ class VectorizedOGBenchEnv(VecEnv):
                     extras['log'][f'/Teacher/{k}'] = torch.tensor(v, device=self.device, dtype=torch.float32)
         
         # Return TensorDict for observations
+        # Also include a raw observation copy to ease off-policy adapters
+        extras.setdefault('observations', {})
+        extras['observations'].setdefault('raw', {})
+        extras['observations']['raw']['obs'] = obs_tensor
         obs_tensordict = TensorDict(
             {"policy": obs_tensor},
             batch_size=[self.num_envs],
