@@ -251,6 +251,22 @@ class VectorizedOGBenchEnv(VecEnv):
                     subgoal_returns.append(info['episode_subgoal_shaping_return'])
                 if 'episode_subgoal_transitions' in info:
                     subgoal_transitions.append(info['episode_subgoal_transitions'])
+
+        # Aggregate teacher intervention metrics if provided by InterventionWrapper
+        teacher_metrics = {
+            'teacher_num_interventions': [],
+            'teacher_intervention_steps': [],
+            'teacher_fraction_steps': [],
+            'teacher_avg_burst_len': [],
+            'teacher_num_safety_interventions': [],
+            'teacher_num_divergence_interventions': [],
+            'teacher_episode_steps': [],
+        }
+        for done, info in zip(dones_array, infos_list):
+            if done and isinstance(info, dict):
+                for k in list(teacher_metrics.keys()):
+                    if k in info:
+                        teacher_metrics[k].append(info[k])
         
         # Create extras dict following Isaac Lab's format
         extras = {"observations": self._current_obs_dict}
@@ -283,6 +299,15 @@ class VectorizedOGBenchEnv(VecEnv):
                 extras['log']['/Episode/subgoal_shaping_return'] = torch.tensor(subgoal_returns, device=self.device)
             if subgoal_transitions:
                 extras['log']['/Episode/subgoal_transitions'] = torch.tensor(subgoal_transitions, device=self.device)
+
+        # Add teacher metrics to extras['log'] if any episodes completed with them
+        if any(len(v) > 0 for v in teacher_metrics.values()):
+            if not extras.get('log'):
+                extras['log'] = {}
+            for k, v in teacher_metrics.items():
+                if v:
+                    # namespace as /Teacher/
+                    extras['log'][f'/Teacher/{k}'] = torch.tensor(v, device=self.device, dtype=torch.float32)
         
         # Return TensorDict for observations
         obs_tensordict = TensorDict(

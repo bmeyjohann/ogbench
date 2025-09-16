@@ -32,7 +32,9 @@ class DetailedRewardWrapper(gym.RewardWrapper):
                  subgoal_shaping_coef: float = 1.0,
                  subgoal_shaping_gamma: float = 0.99,
                  curriculum_stage1_steps_per_env: int = 0,
-                 log_subgoal_metrics: bool = True):
+                 log_subgoal_metrics: bool = True,
+                 # Reward schedule: switch to sparse after N per-env steps (0 disables)
+                 switch_reward_to_sparse_after_steps_per_env: int = 0):
         """
         Initialize the detailed reward wrapper.
         
@@ -56,6 +58,8 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self.subgoal_shaping_gamma = float(subgoal_shaping_gamma)
         self.curriculum_stage1_steps_per_env = int(curriculum_stage1_steps_per_env or 0)
         self.log_subgoal_metrics = log_subgoal_metrics
+        # Reward schedule config (per-env)
+        self.switch_reward_to_sparse_after_steps_per_env = int(switch_reward_to_sparse_after_steps_per_env or 0)
 
         # Track previous position for dense reward calculation
         self._prev_agent_pos = None
@@ -219,15 +223,16 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self._prev_agent_pos = current_agent_pos.copy()
         self._prev_distance = current_distance
         
-        # Return reward based on type
-        if self.reward_type == 'sparse':
+        # Return reward based on effective type (supports switch to sparse)
+        effective_type = self._effective_reward_type()
+        if effective_type == 'sparse':
             dense_reward = 0.0
-        elif self.reward_type == 'dense':
+        elif effective_type == 'dense':
             sparse_reward = 0.0
-        elif self.reward_type == 'combined':
+        elif effective_type == 'combined':
             pass
         else:
-            raise ValueError(f"Unknown reward_type: {self.reward_type}")
+            raise ValueError(f"Unknown reward_type: {effective_type}")
 
         total_reward = sparse_reward + dense_reward + step_reward
 
@@ -236,6 +241,13 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self._last_dense_reward_step = dense_reward
 
         return total_reward
+
+    def _effective_reward_type(self) -> str:
+        """Return reward type with schedule: switch to sparse after configured steps."""
+        if self.switch_reward_to_sparse_after_steps_per_env > 0 and \
+           self._global_step_env >= self.switch_reward_to_sparse_after_steps_per_env:
+            return 'sparse'
+        return self.reward_type
     
     def step(self, action):
         """Step with detailed reward tracking."""
@@ -255,6 +267,7 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self._global_step_env += 1
 
         # Update info with detailed metrics
+        effective_type = self._effective_reward_type()
         info.update({
             'sparse_reward': float(reward),  # Original reward
             'dense_reward': float(self._last_dense_reward_step),
@@ -264,7 +277,7 @@ class DetailedRewardWrapper(gym.RewardWrapper):
             'episode_steps': self._episode_steps,
             'goal_reached': self._goal_reached,
             'distance_to_goal': current_distance,
-            'reward_type': self.reward_type,
+            'reward_type': effective_type,
         })
 
         # Subgoal metrics in info (for logging only, not observed by policy)
