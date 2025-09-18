@@ -183,10 +183,17 @@ class VectorizedOGBenchEnv(VecEnv):
         
         for i, env in enumerate(self.envs):
             obs, reward, terminated, truncated, info = env.step(actions_np[i])
-            obs_list.append(obs)
-            rewards_list.append(reward)
-            dones_list.append(terminated or truncated)
+            done = bool(terminated or truncated)
+            # Collect info before any reset
             infos_list.append(info)
+            rewards_list.append(reward)
+            dones_list.append(done)
+            # Auto-reset done envs to provide the next episode observation
+            if done:
+                obs_reset, _ = env.reset()
+                obs_list.append(obs_reset)
+            else:
+                obs_list.append(obs)
         
         # Convert to arrays
         obs_array = np.stack(obs_list, axis=0)
