@@ -23,7 +23,7 @@ class VectorizedOGBenchEnv(VecEnv):
     """
     
     def __init__(self, env_name: str, num_envs: int = 1, wrappers: List[Callable] = None, 
-                 clip_actions: float | None = None, **env_kwargs):
+                 clip_actions: float | None = None, auto_reset_on_init: bool = True, **env_kwargs):
         """
         Args:
             env_name: OGBench environment name (e.g., 'pointmaze-arena-v0')
@@ -97,8 +97,9 @@ class VectorizedOGBenchEnv(VecEnv):
         
         self.cfg = EnvConfig(env_name, num_envs, self.max_episode_length)
         
-        # Reset all environments to initialize (RSL-RL runner doesn't call reset)
-        self.reset()
+        # Optionally reset all environments to initialize
+        if auto_reset_on_init:
+            self.reset()
     
     @property
     def episode_length_buf(self) -> torch.Tensor:
