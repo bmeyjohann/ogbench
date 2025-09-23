@@ -168,16 +168,17 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                     self.ij_to_xy(ij) for ij in self._teleport_info['teleport_out_ijs']
                 ]
             elif self._maze_type == 'arena_danger':
-                # Arena layout with a central 2x2 block of dangerous tiles (ID 2)
+                # Arena layout with a central block of dangerous tiles (ID 2)
                 maze_map = [
-                    [1, 1, 1, 1, 1, 1, 1, 1],
-                    [1, 0, 0, 0, 0, 0, 0, 1],
-                    [1, 0, 2, 0, 0, 2, 0, 1],
-                    [1, 0, 0, 2, 2, 0, 0, 1],
-                    [1, 0, 0, 2, 2, 0, 0, 1],
-                    [1, 0, 2, 0, 0, 2, 0, 1],
-                    [1, 0, 0, 0, 0, 0, 0, 1],
-                    [1, 1, 1, 1, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1, 1, 1, 1, 1],
+                    [1, 0, 0, 0, 0, 0, 0, 0, 1],
+                    [1, 0, 2, 2, 0, 2, 2, 0, 1],
+                    [1, 0, 0, 2, 2, 2, 0, 0, 1],
+                    [1, 0, 0, 0, 2, 0, 0, 0, 1],
+                    [1, 0, 0, 2, 2, 2, 0, 0, 1],
+                    [1, 0, 2, 2, 0, 2, 2, 0, 1],
+                    [1, 0, 0, 0, 0, 0, 0, 0, 1],
+                    [1, 1, 1, 1, 1, 1, 1, 1, 1],
                 ]
             else:
                 raise ValueError(f'Unknown maze type: {self._maze_type}')
