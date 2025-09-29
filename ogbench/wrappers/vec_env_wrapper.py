@@ -8,7 +8,7 @@ compatibility with RSL-RL's OnPolicyRunner and config system.
 import torch
 import numpy as np
 import gymnasium as gym
-from typing import Dict, Any, List, Callable
+from typing import Dict, Any, List, Callable, Optional
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
@@ -365,6 +365,94 @@ class VectorizedOGBenchEnv(VecEnv):
         for env in self.envs:
             if hasattr(env, 'close'):
                 env.close()
+
+    def switch_env(
+        self,
+        env_name: str,
+        wrappers: Optional[List[Callable]] = None,
+        curriculum_steps: Optional[int] = None,
+        **env_kwargs,
+    ):
+        """Rebuild internal environments with a new OGBench variant.
+
+        Args:
+            env_name: New gym environment id to instantiate.
+            wrappers: Optional wrapper callables to apply. Defaults to the
+                current wrapper list when omitted.
+            **env_kwargs: Extra arguments forwarded to ``gym.make``.
+
+        Notes:
+            This method is primarily used for curriculum runs where the hazard
+            dynamics change after a certain number of global steps (e.g.,
+            switching from ``danger-wall`` to ``danger-lethal``). We fully
+            reconstruct the underlying gym environments to avoid any hidden
+            state carrying over between phases.
+        """
+
+        # Close existing envs before rebuilding to free simulator resources.
+        self.close()
+
+        self.env_name = env_name
+        if wrappers is not None:
+            self.wrappers = wrappers
+        if env_kwargs:
+            self.env_kwargs = env_kwargs
+        else:
+            env_kwargs = self.env_kwargs
+
+        self.envs = []
+        detailed_wrappers: list[Any] = []
+        intervention_wrappers: list[Any] = []
+        for _ in range(self.num_envs):
+            env = gym.make(env_name, **env_kwargs)
+            for wrapper_fn in self.wrappers:
+                env = wrapper_fn(env)
+            # Track particular wrappers so we can restore curriculum progress later
+            detailed_wrappers.append(_find_wrapper(env, 'DetailedRewardWrapper'))
+            intervention_wrappers.append(_find_wrapper(env, 'InterventionWrapper'))
+            self.envs.append(env)
+
+        sample_env = self.envs[0]
+        # Update derived properties in case the observation/action spaces differ.
+        self.observation_space = sample_env.observation_space
+        self.action_space = sample_env.action_space
+        self.num_actions = gym.spaces.flatdim(sample_env.action_space)
+        self.num_obs = gym.spaces.flatdim(sample_env.observation_space)
+        if hasattr(sample_env, '_max_episode_steps'):
+            self.max_episode_length = sample_env._max_episode_steps
+        elif hasattr(sample_env, 'spec') and sample_env.spec and sample_env.spec.max_episode_steps:
+            self.max_episode_length = sample_env.spec.max_episode_steps
+
+        # If requested, restore curriculum counters so we don't restart warmups from scratch.
+        if curriculum_steps is not None:
+            try:
+                from ogbench.wrappers.reward_wrapper import DetailedRewardWrapper
+            except Exception:  # pragma: no cover - optional import guard
+                DetailedRewardWrapper = None
+            try:
+                from ogbench.wrappers.intervention_wrappers import InterventionWrapper
+            except Exception:  # pragma: no cover
+                InterventionWrapper = None
+
+            for w in detailed_wrappers:
+                if DetailedRewardWrapper is not None and isinstance(w, DetailedRewardWrapper):
+                    w._global_step_env = int(curriculum_steps)
+            for w in intervention_wrappers:
+                if InterventionWrapper is not None and isinstance(w, InterventionWrapper):
+                    w._global_step_env = int(curriculum_steps)
+
+        # Reset the new environments so the adapter receives a clean observation batch.
+        self.reset()
+
+
+def _find_wrapper(env: gym.Env, class_name: str):
+    """Traverse wrapper chain to find a wrapper by class name."""
+    current = env
+    while hasattr(current, 'env'):
+        if current.__class__.__name__ == class_name:
+            return current
+        current = current.env
+    return current if current.__class__.__name__ == class_name else None
     
     def seed(self, seed: int = -1) -> int:
         """Set random seed for all environments."""
