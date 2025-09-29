@@ -444,6 +444,31 @@ class VectorizedOGBenchEnv(VecEnv):
         # Reset the new environments so the adapter receives a clean observation batch.
         self.reset()
 
+    def seed(self, seed: int = -1) -> int:
+        """Set random seed for all environments."""
+        for i, env in enumerate(self.envs):
+            if hasattr(env, 'seed'):
+                env.seed(seed + i if seed >= 0 else seed)
+        return seed
+
+    def _modify_action_space(self):
+        """Modifies the action space to the clip range."""
+        if self.clip_actions is None:
+            return
+
+        # Create new clipped action space
+        # Note: This modifies the action space bounds but doesn't affect the actual environments
+        # The clipping is done in the step method
+        clipped_action_space = gym.spaces.Box(
+            low=-self.clip_actions,
+            high=self.clip_actions,
+            shape=(self.num_actions,),
+            dtype=np.float32
+        )
+
+        # Update action space (this is mainly for informational purposes)
+        self.action_space = clipped_action_space
+
 
 def _find_wrapper(env: gym.Env, class_name: str):
     """Traverse wrapper chain to find a wrapper by class name."""
@@ -453,28 +478,3 @@ def _find_wrapper(env: gym.Env, class_name: str):
             return current
         current = current.env
     return current if current.__class__.__name__ == class_name else None
-    
-    def seed(self, seed: int = -1) -> int:
-        """Set random seed for all environments."""
-        for i, env in enumerate(self.envs):
-            if hasattr(env, 'seed'):
-                env.seed(seed + i if seed >= 0 else seed)
-        return seed
-    
-    def _modify_action_space(self):
-        """Modifies the action space to the clip range."""
-        if self.clip_actions is None:
-            return
-        
-        # Create new clipped action space
-        # Note: This modifies the action space bounds but doesn't affect the actual environments
-        # The clipping is done in the step method
-        clipped_action_space = gym.spaces.Box(
-            low=-self.clip_actions, 
-            high=self.clip_actions, 
-            shape=(self.num_actions,),
-            dtype=np.float32
-        )
-        
-        # Update action space (this is mainly for informational purposes)
-        self.action_space = clipped_action_space
