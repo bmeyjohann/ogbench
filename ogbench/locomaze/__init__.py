@@ -66,6 +66,42 @@ register(
         maze_type='arena_danger',
         dangerous_state_mode='lethal',
     ),
+register(
+    id='visual-pointmaze-arena-v0',
+    entry_point='ogbench.locomaze.maze:make_maze_env',
+    max_episode_steps=500,
+    kwargs=dict(
+        loco_env_type='point',
+        maze_env_type='maze',
+        maze_type='arena',
+        ob_type='pixels',
+    ),
+)
+register(
+    id='visual-pointmaze-arena-danger-wall-v0',
+    entry_point='ogbench.locomaze.maze:make_maze_env',
+    max_episode_steps=500,
+    kwargs=dict(
+        loco_env_type='point',
+        maze_env_type='maze',
+        maze_type='arena_danger',
+        dangerous_state_mode='wall',
+        ob_type='pixels',
+    ),
+)
+register(
+    id='visual-pointmaze-arena-danger-lethal-v0',
+    entry_point='ogbench.locomaze.maze:make_maze_env',
+    max_episode_steps=500,
+    kwargs=dict(
+        loco_env_type='point',
+        maze_env_type='maze',
+        maze_type='arena_danger',
+        dangerous_state_mode='lethal',
+        ob_type='pixels',
+    ),
+)
+
 )
 register(
     id='pointmaze-medium-v0',
