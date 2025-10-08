@@ -374,19 +374,18 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                     tree.find('.//geom[@name="aux_1_geom"]').set('material', 'self_white')
                     tree.find('.//geom[@name="left_leg_geom"]').set('material', 'self_white')
                     tree.find('.//geom[@name="left_ankle_geom"]').set('material', 'self_white')
-            else:
-                # Only show the target for states-based observation.
-                ET.SubElement(
-                    worldbody,
-                    'geom',
-                    name='target',
-                    type='cylinder',
-                    size='.5 .05',
-                    pos='0 0 .05',
-                    material='target',
-                    contype='0',
-                    conaffinity='0',
-                )
+                
+            ET.SubElement(
+                worldbody,
+                'geom',
+                name='target',
+                type='cylinder',
+                size='.5 .05',
+                pos='0 0 .05',
+                material='target',
+                contype='0',
+                conaffinity='0',
+            )
 
         def is_traversable(self, i, j):
             if not (0 <= i < self.maze_map.shape[0] and 0 <= j < self.maze_map.shape[1]):
