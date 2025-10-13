@@ -637,8 +637,11 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                     self.cur_goal_xy = self.add_noise(self.cur_goal_xy)
             else:
                 self.cur_goal_xy = goal_xy
-            if self._ob_type == 'states':
-                self.model.geom('target').pos[:2] = goal_xy
+            geom_name = getattr(self, '_goal_geom_name', 'target')
+            try:
+                self.model.geom(geom_name).pos[:2] = self.cur_goal_xy
+            except (KeyError, AttributeError):
+                pass
 
         def get_oracle_subgoal(self, start_xy, goal_xy):
             """Get the oracle subgoal for the agent.

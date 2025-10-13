@@ -87,17 +87,44 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self._last_sparse_reward_step = 0.0
     
     def _extract_positions(self, obs):
-        """Extract agent and goal positions from observation."""
+        """Extract agent and goal positions from observation or environment state."""
+        agent_pos, goal_pos = self._agent_goal_from_env()
+        if agent_pos is not None and goal_pos is not None:
+            return agent_pos, goal_pos
+
         # Assume obs format from FlexibleObsWrapper: [agent_x, agent_y, goal_x, goal_y, ...]
-        if len(obs) >= 4:
+        if isinstance(obs, np.ndarray) and obs.ndim == 1 and len(obs) >= 4:
             agent_pos = obs[:2]
             goal_pos = obs[2:4]
         else:
-            # Fallback: use info from environment
-            agent_pos = obs[:2]
+            # Fallback: use whatever we tracked last (may be zeros initially)
+            agent_pos = obs[:2] if isinstance(obs, np.ndarray) else np.zeros(2)
             goal_pos = self._goal_pos if self._goal_pos is not None else np.zeros(2)
         
-        return np.array(agent_pos), np.array(goal_pos)
+        return np.array(agent_pos, dtype=np.float32), np.array(goal_pos, dtype=np.float32)
+
+    def _agent_goal_from_env(self):
+        """Try to read agent and goal positions directly from the base environment."""
+        env = self.unwrapped
+        agent_pos = goal_pos = None
+
+        try:
+            if hasattr(env, 'get_xy'):
+                agent_pos = np.array(env.get_xy(), dtype=np.float32)
+            elif hasattr(env, 'get_agent_ball_xy'):
+                agent_pos = np.array(env.get_agent_ball_xy()[0], dtype=np.float32)
+        except Exception:
+            agent_pos = None
+
+        try:
+            if hasattr(env, 'cur_goal_xy'):
+                goal_pos = np.array(env.cur_goal_xy, dtype=np.float32)
+        except Exception:
+            goal_pos = None
+
+        if agent_pos is not None and goal_pos is not None:
+            return agent_pos, goal_pos
+        return None, None
     
     def reset(self, **kwargs):
         """Reset environment and tracking."""
@@ -105,6 +132,11 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         
         # Extract positions
         self._prev_agent_pos, self._goal_pos = self._extract_positions(obs)
+        env_agent, env_goal = self._agent_goal_from_env()
+        if env_agent is not None:
+            self._prev_agent_pos = env_agent
+        if env_goal is not None:
+            self._goal_pos = env_goal
         
         # Calculate initial distance
         self._prev_distance = np.linalg.norm(self._goal_pos - self._prev_agent_pos)
@@ -257,10 +289,20 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         detailed_reward = self.reward(reward)
         
         # Get current positions for metrics
+        current_agent_pos = self._prev_agent_pos
+        current_goal_pos = self._goal_pos
         try:
             current_agent_pos, current_goal_pos = self._extract_positions(obs)
+        except Exception:
+            pass
+        env_agent, env_goal = self._agent_goal_from_env()
+        if env_agent is not None:
+            current_agent_pos = env_agent
+        if env_goal is not None:
+            current_goal_pos = env_goal
+        if current_agent_pos is not None and current_goal_pos is not None:
             current_distance = np.linalg.norm(current_goal_pos - current_agent_pos)
-        except:
+        else:
             current_distance = self._prev_distance if self._prev_distance is not None else 0.0
         
         # Curriculum bookkeeping (per-env global step)
@@ -285,15 +327,23 @@ class DetailedRewardWrapper(gym.RewardWrapper):
             subgoal_xy, subgoal_index = self._last_active_subgoal, self._last_subgoal_index
             if subgoal_xy is None:
                 # Try to compute once here if not available yet
-                agent_pos = obs[:2] if isinstance(obs, np.ndarray) and obs.shape[0] >= 2 else self._prev_agent_pos
-                goal_pos = obs[2:4] if isinstance(obs, np.ndarray) and obs.shape[0] >= 4 else self._goal_pos
+                if isinstance(obs, np.ndarray) and obs.ndim == 1 and obs.shape[0] >= 4:
+                    agent_pos = obs[:2]
+                    goal_pos = obs[2:4]
+                else:
+                    agent_pos, goal_pos = self._agent_goal_from_env()
+                    if agent_pos is None:
+                        agent_pos = self._prev_agent_pos
+                    if goal_pos is None:
+                        goal_pos = self._goal_pos
                 sg, idx = self._get_active_subgoal(agent_pos, goal_pos)
                 subgoal_xy, subgoal_index = sg, idx
                 if sg is not None and self._prev_potential is None:
                     self._prev_potential = -float(np.linalg.norm(sg - agent_pos))
             if subgoal_xy is not None:
+                agent_for_metrics = current_agent_pos if current_agent_pos is not None else self._prev_agent_pos
                 info.update({
-                    'distance_to_subgoal': float(np.linalg.norm(subgoal_xy - (obs[:2] if isinstance(obs, np.ndarray) else self._prev_agent_pos))),
+                    'distance_to_subgoal': float(np.linalg.norm(subgoal_xy - agent_for_metrics)),
                     'subgoal_index': subgoal_index if subgoal_index is not None else -1,
                     'subgoal_shaping_coef': float(self.subgoal_shaping_coef if self._is_stage1_enabled() and self.use_subgoal_shaping else 0.0),
                     'curriculum_stage': 1 if (self._is_stage1_enabled() and self.use_subgoal_shaping) else 2,
