@@ -233,17 +233,22 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 tex_grid = self.model.tex('grid')
                 tex_height = tex_grid.height[0]
                 tex_width = tex_grid.width[0]
+                
                 # MuJoCo 3.2.1 changed the attribute name from 'tex_rgb' to 'tex_data'.
                 attr_name = 'tex_rgb' if hasattr(self.model, 'tex_rgb') else 'tex_data'
                 tex_rgb = getattr(self.model, attr_name)[tex_grid.adr[0] : tex_grid.adr[0] + 3 * tex_height * tex_width]
                 tex_rgb = tex_rgb.reshape(tex_height, tex_width, 3)
-                for x in range(tex_height):
-                    for y in range(tex_width):
-                        min_value = 0
-                        max_value = 192
-                        r = int(x / tex_height * (max_value - min_value) + min_value)
-                        g = int(y / tex_width * (max_value - min_value) + min_value)
-                        tex_rgb[x, y, :] = [r, g, 128]
+                
+                # Set all pixels to gray instead of encoding pixel locations
+                tex_rgb[:, :, :] = [128, 128, 128]
+                
+                # for x in range(tex_height):
+                #     for y in range(tex_width):
+                #         min_value = 0
+                #         max_value = 192
+                #         r = int(x / tex_height * (max_value - min_value) + min_value)
+                #         g = int(y / tex_width * (max_value - min_value) + min_value)
+                #         tex_rgb[x, y, :] = [r, g, 128]
                 self.initialize_renderer()
             else:
                 ex_ob = self.get_ob()
