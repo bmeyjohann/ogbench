@@ -108,6 +108,8 @@ class InterventionWrapper(gym.Wrapper):
         if self.teleop is None or not hasattr(self.teleop, 'get_action'):
             return None
         human_action = self.teleop.get_action()
+        if human_action is None:
+            return None
         if np.linalg.norm(human_action) > self.threshold:
             self._last_override_ts = time.perf_counter()
         is_active = (time.perf_counter() - self._last_override_ts) < self.hold_time

@@ -8,6 +8,7 @@ compatibility with RSL-RL's OnPolicyRunner and config system.
 import torch
 import numpy as np
 import gymnasium as gym
+import warnings
 from typing import Dict, Any, List, Callable, Optional
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
@@ -21,6 +22,16 @@ class VectorizedOGBenchEnv(VecEnv):
     Manages multiple environments internally and provides vectorized
     step/reset functionality.
     """
+
+    _PIXEL_CAMERA_KEYS = (
+        'pixel_camera_mode',
+        'pixel_local_view_size',
+        'pixel_local_camera_height',
+        'pixel_first_person_distance',
+        'pixel_first_person_height',
+        'pixel_first_person_lookahead',
+        'pixel_first_person_pitch',
+    )
     
     def __init__(self, env_name: str, num_envs: int = 1, wrappers: List[Callable] = None, 
                  clip_actions: float | None = None, auto_reset_on_init: bool = True, **env_kwargs):
@@ -37,13 +48,13 @@ class VectorizedOGBenchEnv(VecEnv):
         
         self.env_name = env_name
         self.wrappers = wrappers or []
-        self.env_kwargs = env_kwargs
+        self.env_kwargs = dict(env_kwargs)
         self.clip_actions = clip_actions
         
         # Create individual environments
         self.envs = []
         for i in range(num_envs):
-            env = gym.make(env_name, **env_kwargs)
+            env = self._make_env(env_name)
             # Apply wrappers
             for wrapper_fn in self.wrappers:
                 env = wrapper_fn(env)
@@ -396,15 +407,13 @@ class VectorizedOGBenchEnv(VecEnv):
         if wrappers is not None:
             self.wrappers = wrappers
         if env_kwargs:
-            self.env_kwargs = env_kwargs
-        else:
-            env_kwargs = self.env_kwargs
+            self.env_kwargs = dict(env_kwargs)
 
         self.envs = []
         detailed_wrappers: list[Any] = []
         intervention_wrappers: list[Any] = []
         for _ in range(self.num_envs):
-            env = gym.make(env_name, **env_kwargs)
+            env = self._make_env(env_name)
             for wrapper_fn in self.wrappers:
                 env = wrapper_fn(env)
             # Track particular wrappers so we can restore curriculum progress later
@@ -443,6 +452,26 @@ class VectorizedOGBenchEnv(VecEnv):
 
         # Reset the new environments so the adapter receives a clean observation batch.
         self.reset()
+
+    def _make_env(self, env_name: str):
+        try:
+            return gym.make(env_name, **self.env_kwargs)
+        except TypeError as exc:
+            if self._strip_pixel_camera_kwargs(exc):
+                return gym.make(env_name, **self.env_kwargs)
+            raise
+
+    def _strip_pixel_camera_kwargs(self, exc: Exception) -> bool:
+        message = str(exc)
+        if not any(key in message for key in self._PIXEL_CAMERA_KEYS):
+            return False
+        for key in self._PIXEL_CAMERA_KEYS:
+            if key in self.env_kwargs:
+                self.env_kwargs.pop(key)
+        warnings.warn(
+            f"Environment '{self.env_name}' does not accept pixel camera kwargs; falling back to defaults."
+        )
+        return True
 
     def seed(self, seed: int = -1) -> int:
         """Set random seed for all environments."""

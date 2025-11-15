@@ -1,9 +1,11 @@
 import tempfile
+import warnings
 import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
 from gymnasium.spaces import Box
+from typing import Optional
 
 from ogbench.locomaze.ant import AntEnv
 from ogbench.locomaze.humanoid import HumanoidEnv
@@ -50,6 +52,13 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             dangerous_marker_rgba=(1.0, 0.25, 0.25, 1.0),
             dangerous_invisible_wall_rgba=(1.0, 0.0, 0.0, 0.0),
             dangerous_sticky_action_scale: float = 0.5,
+            pixel_camera_mode: str = 'global',
+            pixel_local_view_size: float = 12.0,
+            pixel_local_camera_height: Optional[float] = None,
+            pixel_first_person_distance: float = 3.0,
+            pixel_first_person_height: float = 1.0,
+            pixel_first_person_lookahead: float = 2.0,
+            pixel_first_person_pitch: float = -15.0,
             *args,
             **kwargs,
         ):
@@ -86,6 +95,18 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             self._dangerous_marker_rgba = tuple(dangerous_marker_rgba)
             self._dangerous_invisible_wall_rgba = tuple(dangerous_invisible_wall_rgba)
             self._dangerous_sticky_action_scale = float(dangerous_sticky_action_scale)
+            self._pixel_camera_mode = str(pixel_camera_mode or 'global').lower()
+            if self._pixel_camera_mode not in ['global', 'agent_local', 'first_person']:
+                warnings.warn(f"Unknown pixel_camera_mode '{pixel_camera_mode}', falling back to 'global'")
+                self._pixel_camera_mode = 'global'
+            self._pixel_local_view_size = max(0.1, float(pixel_local_view_size))
+            self._pixel_local_camera_height = (
+                float(pixel_local_camera_height) if pixel_local_camera_height is not None else None
+            )
+            self._pixel_first_person_distance = max(0.1, float(pixel_first_person_distance))
+            self._pixel_first_person_height = float(pixel_first_person_height)
+            self._pixel_first_person_lookahead = float(pixel_first_person_lookahead)
+            self._pixel_first_person_pitch = float(pixel_first_person_pitch)
 
             # Define constants.
             self._offset_x = 4
@@ -205,16 +226,41 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
 
             super().__init__(xml_file=maze_xml_file, *args, **kwargs)
 
+            self._last_xy = np.array(self.get_xy(), dtype=np.float64)
+            self._last_move_dir = np.array([1.0, 0.0], dtype=np.float64)
+            self._camera_anchor_body = self._resolve_camera_anchor_body()
+            self._anchor_height = self._infer_anchor_height()
+            vis_global = getattr(self.model.vis, 'global', None)
+            fovy_deg = getattr(vis_global, 'fovy', 45.0) if vis_global is not None else 45.0
+            if not isinstance(fovy_deg, (int, float)) or fovy_deg <= 0:
+                fovy_deg = 45.0
+            self._camera_fovy_rad = np.deg2rad(fovy_deg)
+            self._global_camera_distance = 5 * (self.maze_map.shape[1] - 2)
+            self._global_camera_center = np.array(
+                [
+                    2 * (self.maze_map.shape[1] - 3),
+                    2 * (self.maze_map.shape[0] - 3),
+                    0.0,
+                ],
+                dtype=np.float64,
+            )
+            self._dynamic_camera_enabled = (
+                self._ob_type == 'pixels'
+                and self._pixel_camera_mode in ['agent_local', 'first_person']
+                and self.camera_id is None
+                and self.camera_name is None
+            )
+
             # Make custom camera.
             if self.camera_id is None and self.camera_name is None:
-                # Use a custom default view.
                 camera = mujoco.MjvCamera()
-                camera.lookat[0] = 2 * (self.maze_map.shape[1] - 3)
-                camera.lookat[1] = 2 * (self.maze_map.shape[0] - 3)
-                camera.distance = 5 * (self.maze_map.shape[1] - 2)
-                camera.elevation = -90
+                self._configure_global_camera(camera)
                 self.custom_camera = camera
             else:
+                if self._pixel_camera_mode != 'global' and self._ob_type == 'pixels':
+                    warnings.warn(
+                        "pixel_camera_mode is ignored when a fixed camera_id/camera_name is provided."
+                    )
                 self.custom_camera = self.camera_id or self.camera_name
 
             # Set task goals.
@@ -488,6 +534,89 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             )
             self.render()
 
+        def _resolve_camera_anchor_body(self) -> Optional[int]:
+            candidate_names = ['torso', 'root', 'pelvis', 'body0']
+            for name in candidate_names:
+                try:
+                    return mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+                except (KeyError, ValueError, mujoco.FatalError):
+                    continue
+            return 0 if getattr(self.model, 'nbody', 0) > 0 else None
+
+        def _infer_anchor_height(self) -> float:
+            if self._camera_anchor_body is not None:
+                try:
+                    return float(self.data.xpos[self._camera_anchor_body, 2])
+                except Exception:
+                    pass
+            # Fallback to 0.5m above ground
+            return 0.5
+
+        def _configure_global_camera(self, camera: mujoco.MjvCamera) -> None:
+            camera.lookat[:] = self._global_camera_center
+            camera.distance = self._global_camera_distance
+            camera.elevation = -90.0
+            camera.azimuth = 0.0
+
+        def _distance_from_extent(self, extent: float) -> float:
+            if extent <= 0:
+                return self._global_camera_distance
+            half_angle = max(1e-6, self._camera_fovy_rad / 2.0)
+            return extent / (2.0 * np.tan(half_angle))
+
+        def _anchor_height_current(self) -> float:
+            if self._camera_anchor_body is not None:
+                try:
+                    return float(self.data.xpos[self._camera_anchor_body, 2])
+                except Exception:
+                    pass
+            return self._anchor_height
+
+        def _update_dynamic_camera(self):
+            if not isinstance(self.custom_camera, mujoco.MjvCamera):
+                return
+            if not self._dynamic_camera_enabled:
+                if self._pixel_camera_mode == 'global':
+                    self._configure_global_camera(self.custom_camera)
+                return
+            xy = np.array(self.get_xy(), dtype=np.float64)
+            anchor_height = self._anchor_height_current()
+
+            if self._pixel_camera_mode == 'agent_local':
+                lookat = np.array([xy[0], xy[1], anchor_height], dtype=np.float64)
+                self.custom_camera.lookat[:] = lookat
+                target_distance = (
+                    float(self._pixel_local_camera_height)
+                    if self._pixel_local_camera_height is not None
+                    else self._distance_from_extent(self._pixel_local_view_size)
+                )
+                self.custom_camera.distance = max(0.1, target_distance)
+                self.custom_camera.elevation = -90.0
+                self.custom_camera.azimuth = 90.0
+                return
+
+            # First-person camera
+            direction = self._last_move_dir
+            norm = np.linalg.norm(direction)
+            if norm < 1e-6:
+                direction = np.array([1.0, 0.0], dtype=np.float64)
+            else:
+                direction = direction / norm
+            lookahead = self._pixel_first_person_lookahead
+            lookat = np.array(
+                [
+                    xy[0] + direction[0] * lookahead,
+                    xy[1] + direction[1] * lookahead,
+                    anchor_height + self._pixel_first_person_height,
+                ],
+                dtype=np.float64,
+            )
+            self.custom_camera.lookat[:] = lookat
+            self.custom_camera.distance = max(0.1, self._pixel_first_person_distance)
+            self.custom_camera.elevation = float(self._pixel_first_person_pitch)
+            azimuth = np.degrees(np.arctan2(direction[1], direction[0]))
+            self.custom_camera.azimuth = float(azimuth)
+
         def reset(self, options=None, *args, **kwargs):
             if options is None:
                 options = {}
@@ -546,6 +675,9 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             if render_goal:
                 info['goal_rendered'] = goal_rendered
 
+            self._last_xy = np.array(self.get_xy(), dtype=np.float64)
+            self._last_move_dir = np.array([1.0, 0.0], dtype=np.float64)
+
             return ob, info
 
         def step(self, action):
@@ -559,6 +691,7 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             ):
                 action = action * self._dangerous_sticky_action_scale
 
+            prev_xy = np.array(self.get_xy(), dtype=np.float64)
             ob, reward, terminated, truncated, info = super().step(action)
 
             if self._teleport_info is not None:
@@ -600,6 +733,15 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             if self._reward_task_id is not None:
                 reward = reward - 1.0  # -1 (failure) or 0 (success).
 
+            new_xy = np.array(self.get_xy(), dtype=np.float64)
+            delta = new_xy - prev_xy
+            norm = np.linalg.norm(delta)
+            if norm > 1e-6:
+                self._last_move_dir = delta / norm
+            self._last_xy = new_xy
+            if self._ob_type == 'pixels':
+                ob = self.get_ob()
+
             return ob, reward, terminated, truncated, info
 
         def render(self):
@@ -610,6 +752,7 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 # Use custom renderer for offscreen rendering
                 if self.custom_renderer is None:
                     self.initialize_renderer()
+                self._update_dynamic_camera()
                 self.custom_renderer.update_scene(self.data, camera=self.custom_camera)
                 return self.custom_renderer.render()
 
