@@ -107,6 +107,7 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             self._pixel_first_person_height = float(pixel_first_person_height)
             self._pixel_first_person_lookahead = float(pixel_first_person_lookahead)
             self._pixel_first_person_pitch = float(pixel_first_person_pitch)
+            self._view_dir = None
 
             # Define constants.
             self._offset_x = 4
@@ -596,7 +597,7 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 return
 
             # First-person camera
-            direction = self._last_move_dir
+            direction = self._view_dir if self._view_dir is not None else self._last_move_dir
             norm = np.linalg.norm(direction)
             if norm < 1e-6:
                 direction = np.array([1.0, 0.0], dtype=np.float64)
@@ -677,6 +678,7 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
 
             self._last_xy = np.array(self.get_xy(), dtype=np.float64)
             self._last_move_dir = np.array([1.0, 0.0], dtype=np.float64)
+            self._view_dir = None
 
             return ob, info
 
@@ -743,6 +745,20 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 ob = self.get_ob()
 
             return ob, reward, terminated, truncated, info
+
+        def set_view_dir(self, view_dir=None):
+            if view_dir is None:
+                self._view_dir = None
+                return
+            vec = np.asarray(view_dir, dtype=np.float64).reshape(-1)
+            if vec.shape[0] < 2:
+                self._view_dir = None
+                return
+            norm = np.linalg.norm(vec[:2])
+            if norm < 1e-6:
+                self._view_dir = None
+            else:
+                self._view_dir = vec[:2] / norm
 
         def render(self):
             if self.render_mode == "human":
