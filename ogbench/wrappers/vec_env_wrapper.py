@@ -234,6 +234,7 @@ class VectorizedOGBenchEnv(VecEnv):
         dense_rewards = []
         goals_reached = []
         distances = []
+        killed = []
         subgoal_avgs = []
         subgoal_returns = []
         subgoal_transitions = []
@@ -264,6 +265,7 @@ class VectorizedOGBenchEnv(VecEnv):
                     goals_reached.append(info['goal_reached'])
                 if 'distance_to_goal' in info:
                     distances.append(info['distance_to_goal'])
+                killed.append(info.get('killed', 0.0))
                 if 'episode_avg_distance_to_subgoal' in info:
                     subgoal_avgs.append(info['episode_avg_distance_to_subgoal'])
                 if 'episode_subgoal_shaping_return' in info:
@@ -279,6 +281,7 @@ class VectorizedOGBenchEnv(VecEnv):
             'teacher_avg_burst_len': [],
             'teacher_num_safety_interventions': [],
             'teacher_num_divergence_interventions': [],
+            'teacher_num_progress_interventions': [],
             'teacher_episode_steps': [],
         }
         for done, info in zip(dones_array, infos_list):
@@ -332,6 +335,8 @@ class VectorizedOGBenchEnv(VecEnv):
             extras['episode_dense_rewards'] = dense_rewards
             extras['goals_reached'] = goals_reached
             extras['distances_to_goal'] = distances
+            if killed:
+                extras['lethal_terminations'] = killed
             
             # Add RSL-RL compatible logging metrics using extras["log"] format
             # Following RSL-RL VecEnv documentation: keys start with "/" for namespacing
@@ -343,6 +348,8 @@ class VectorizedOGBenchEnv(VecEnv):
             extras['log']['/Episode/final_distance'] = torch.tensor(distances, device=self.device)
             extras['log']['/Episode/sparse_reward'] = torch.tensor(sparse_rewards, device=self.device)
             extras['log']['/Episode/dense_reward'] = torch.tensor(dense_rewards, device=self.device)
+            if killed:
+                extras['log']['/Episode/lethal'] = torch.tensor([float(k) for k in killed], device=self.device)
             if subgoal_avgs:
                 extras['log']['/Episode/avg_distance_to_subgoal'] = torch.tensor(subgoal_avgs, device=self.device)
             if subgoal_returns:

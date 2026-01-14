@@ -263,6 +263,9 @@ class DetailedRewardWrapper(gym.RewardWrapper):
             sparse_reward = 0.0
         elif effective_type == 'combined':
             pass
+        elif effective_type == 'none':
+            sparse_reward = 0.0
+            dense_reward = 0.0
         else:
             raise ValueError(f"Unknown reward_type: {effective_type}")
 
@@ -276,6 +279,8 @@ class DetailedRewardWrapper(gym.RewardWrapper):
 
     def _effective_reward_type(self) -> str:
         """Return reward type with schedule: switch to sparse after configured steps."""
+        if self.reward_type == 'none':
+            return 'none'
         if self.switch_reward_to_sparse_after_steps_per_env > 0 and \
            self._global_step_env >= self.switch_reward_to_sparse_after_steps_per_env:
             return 'sparse'

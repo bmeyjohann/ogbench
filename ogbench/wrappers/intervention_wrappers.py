@@ -13,6 +13,7 @@ class _InterventionStats:
     num_interventions: int = 0
     num_safety: int = 0
     num_divergence: int = 0
+    num_progress: int = 0
     _in_burst: bool = False
     _current_burst_len: int = 0
     _burst_lens_sum: int = 0
@@ -46,6 +47,7 @@ class _InterventionStats:
             teacher_avg_burst_len=float(avg_burst),
             teacher_num_safety_interventions=int(self.num_safety),
             teacher_num_divergence_interventions=int(self.num_divergence),
+            teacher_num_progress_interventions=int(self.num_progress),
             teacher_episode_steps=int(self.episode_steps),
         )
 
@@ -74,11 +76,15 @@ class InterventionWrapper(gym.Wrapper):
         tolerance_value: float = 30.0,  # degrees for angle, absolute for l2
         hard_block_lethal: bool = True,  # intervene if student's step enters lethal/danger cell
         enable_after_steps: int = 0,     # warmup steps per env before enabling interventions
+        agent_mode: str = 'divergence',  # 'divergence', 'safety_align', 'safety_progress'
+        safety_margin_frac: float = 0.0,  # fraction of maze cell size for safety margin
+        release_steps: int = 3,  # consecutive steps to release intervention
     ):
         super().__init__(env)
 
         assert mode in ('human', 'agent')
         assert tolerance_type in ('angle', 'l2')
+        assert agent_mode in ('divergence', 'safety_align', 'safety_progress')
         self.mode = mode
         self.teacher_type = teacher_type
         self.teleop = teleop_interface
@@ -88,6 +94,9 @@ class InterventionWrapper(gym.Wrapper):
         self.tolerance_value = float(tolerance_value)
         self.hard_block_lethal = bool(hard_block_lethal)
         self.enable_after_steps = int(enable_after_steps)
+        self.agent_mode = agent_mode
+        self.safety_margin_frac = float(safety_margin_frac)
+        self.release_steps = int(release_steps)
         
 
         # Internal timers (human)
@@ -97,9 +106,21 @@ class InterventionWrapper(gym.Wrapper):
         self._stats = _InterventionStats()
 
         # Teacher cache (for future types); BFS uses env oracle per-step
-        print(f"[InterventionWrapper] Initialized. mode={self.mode}, teacher={self.teacher_type}")
+        print(
+            "[InterventionWrapper] Initialized."
+            f" mode={self.mode}, teacher={self.teacher_type},"
+            f" agent_mode={self.agent_mode}"
+        )
         # Global per-env step counter across episodes
         self._global_step_env = 0
+        self._danger_centers: Optional[np.ndarray] = None
+        self._maze_unit: Optional[float] = None
+        self._align_count = 0
+        self._progress_good_count = 0
+        self._progress_violation = False
+        self._last_distance: Optional[float] = None
+        self._safety_align_active = False
+        self._progress_active = False
 
     # ---------------
     # Human utilities
@@ -189,6 +210,56 @@ class InterventionWrapper(gym.Wrapper):
             # Fallback: be permissive if API missing
             return True
 
+    def _danger_centers_xy(self) -> Optional[np.ndarray]:
+        """Cache and return dangerous tile centers as an (N, 2) array."""
+        if self._danger_centers is not None:
+            return self._danger_centers
+        base = self.unwrapped
+        maze_map = getattr(base, 'maze_map', None)
+        dangerous_id = getattr(base, '_dangerous_tile_id', None)
+        ij_to_xy = getattr(base, 'ij_to_xy', None)
+        maze_unit = getattr(base, '_maze_unit', None)
+        if maze_map is None or dangerous_id is None or ij_to_xy is None:
+            return None
+        centers = []
+        for i in range(maze_map.shape[0]):
+            for j in range(maze_map.shape[1]):
+                if maze_map[i, j] == dangerous_id:
+                    centers.append(ij_to_xy((i, j)))
+        if not centers:
+            self._danger_centers = None
+            return None
+        self._danger_centers = np.asarray(centers, dtype=np.float32)
+        self._maze_unit = float(maze_unit) if maze_unit is not None else 1.0
+        return self._danger_centers
+
+    def _near_danger_margin(self) -> bool:
+        if self.safety_margin_frac <= 0:
+            return False
+        centers = self._danger_centers_xy()
+        if centers is None:
+            return False
+        try:
+            agent_xy = np.array(self.unwrapped.get_xy(), dtype=np.float32)
+        except Exception:
+            return False
+        maze_unit = self._maze_unit if self._maze_unit is not None else 1.0
+        margin = self.safety_margin_frac * maze_unit
+        dists = np.linalg.norm(centers - agent_xy[None, :], axis=1)
+        min_dist = float(np.min(dists))
+        dist_to_boundary = max(0.0, min_dist - 0.5 * maze_unit)
+        return dist_to_boundary <= margin
+
+    def _goal_distance(self) -> Optional[float]:
+        try:
+            agent_xy = np.array(self.unwrapped.get_xy(), dtype=np.float32)
+            goal_xy = np.array(getattr(self.unwrapped, 'cur_goal_xy', None), dtype=np.float32)
+        except Exception:
+            return None
+        if goal_xy is None or goal_xy.shape != (2,):
+            return None
+        return float(np.linalg.norm(goal_xy - agent_xy))
+
     # --------------
     # Gym overrides
     # --------------
@@ -198,6 +269,12 @@ class InterventionWrapper(gym.Wrapper):
         self._stats = _InterventionStats()
         # reset human timer
         self._last_override_ts = 0.0
+        self._align_count = 0
+        self._progress_good_count = 0
+        self._progress_violation = False
+        self._safety_align_active = False
+        self._progress_active = False
+        self._last_distance = self._goal_distance()
         return obs, info
 
     def step(self, policy_action: np.ndarray):
@@ -222,25 +299,74 @@ class InterventionWrapper(gym.Wrapper):
                 predicted = self._predict_next_xy(policy_action)
                 if predicted is not None and (not self._is_traversable_cell(predicted)):
                     safety_violation = True
-            # Divergence check
-            diverged = False
-            if teacher_action is not None and policy_action is not None and not safety_violation:
-                if self.tolerance_type == 'angle':
-                    ang = self._angle_deg(policy_action, teacher_action)
-                    diverged = ang > self.tolerance_value
+            safety_margin = self._near_danger_margin()
+
+            if self.agent_mode == 'divergence':
+                diverged = False
+                if teacher_action is not None and policy_action is not None and not safety_violation:
+                    if self.tolerance_type == 'angle':
+                        ang = self._angle_deg(policy_action, teacher_action)
+                        diverged = ang > self.tolerance_value
+                    else:
+                        diverged = float(np.linalg.norm(policy_action - teacher_action)) > self.tolerance_value
+                if safety_violation:
+                    reason = 'safety'
+                elif diverged:
+                    reason = 'divergence'
                 else:
-                    diverged = float(np.linalg.norm(policy_action - teacher_action)) > self.tolerance_value
-            if safety_violation:
-                reason = 'safety'
-            elif diverged:
-                reason = 'divergence'
-            else:
-                teacher_action = None
+                    teacher_action = None
+            elif self.agent_mode == 'safety_align':
+                aligned = False
+                if teacher_action is not None and policy_action is not None:
+                    if self.tolerance_type == 'angle':
+                        aligned = self._angle_deg(policy_action, teacher_action) <= self.tolerance_value
+                    else:
+                        aligned = float(np.linalg.norm(policy_action - teacher_action)) <= self.tolerance_value
+                if aligned:
+                    self._align_count += 1
+                else:
+                    self._align_count = 0
+
+                if safety_violation or safety_margin:
+                    self._safety_align_active = True
+
+                if self._safety_align_active:
+                    if (not safety_violation and not safety_margin and self._align_count >= self.release_steps):
+                        self._safety_align_active = False
+                    else:
+                        reason = 'safety'
+                if not self._safety_align_active:
+                    teacher_action = None
+            else:  # safety_progress
+                if safety_violation or safety_margin or self._progress_violation:
+                    self._progress_active = True
+
+                if self._progress_active:
+                    if (not safety_violation and not safety_margin and self._progress_good_count >= self.release_steps):
+                        self._progress_active = False
+                    else:
+                        reason = 'safety' if (safety_violation or safety_margin) else 'progress'
+                if not self._progress_active:
+                    teacher_action = None
 
         # Apply action
         intervened = teacher_action is not None
         action_to_take = teacher_action if intervened else policy_action
         obs, reward, terminated, truncated, info = self.env.step(action_to_take)
+
+        # Update progress tracking based on actual next state
+        new_distance = self._goal_distance()
+        if new_distance is not None and self._last_distance is not None:
+            delta = new_distance - self._last_distance
+            self._progress_violation = delta > 0.0
+            if self._progress_active:
+                if delta < 0.0:
+                    self._progress_good_count += 1
+                else:
+                    self._progress_good_count = 0
+            else:
+                self._progress_good_count = 0
+        self._last_distance = new_distance
 
         # Stats update
         self._stats.episode_steps += 1
@@ -252,6 +378,8 @@ class InterventionWrapper(gym.Wrapper):
                 self._stats.num_safety += 1
             elif reason == 'divergence' or reason == 'human':
                 self._stats.num_divergence += 1
+            elif reason == 'progress':
+                self._stats.num_progress += 1
             # Count new interventions when a burst starts at this step
             if self._stats._current_burst_len == 1:
                 self._stats.num_interventions += 1
