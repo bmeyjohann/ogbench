@@ -283,6 +283,8 @@ class VectorizedOGBenchEnv(VecEnv):
             'teacher_num_divergence_interventions': [],
             'teacher_num_progress_interventions': [],
             'teacher_episode_steps': [],
+            'teacher_episode_gate_enabled': [],
+            'teacher_episode_gate_prob': [],
         }
         for done, info in zip(dones_array, infos_list):
             if done and isinstance(info, dict):

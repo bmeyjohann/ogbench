@@ -14,6 +14,8 @@ class _InterventionStats:
     num_safety: int = 0
     num_divergence: int = 0
     num_progress: int = 0
+    episode_gate_enabled: int = 1
+    episode_gate_prob: float = 1.0
     _in_burst: bool = False
     _current_burst_len: int = 0
     _burst_lens_sum: int = 0
@@ -49,6 +51,8 @@ class _InterventionStats:
             teacher_num_divergence_interventions=int(self.num_divergence),
             teacher_num_progress_interventions=int(self.num_progress),
             teacher_episode_steps=int(self.episode_steps),
+            teacher_episode_gate_enabled=int(self.episode_gate_enabled),
+            teacher_episode_gate_prob=float(self.episode_gate_prob),
         )
 
 
@@ -79,6 +83,11 @@ class InterventionWrapper(gym.Wrapper):
         agent_mode: str = 'divergence',  # 'divergence', 'safety_align', 'safety_progress'
         safety_margin_frac: float = 0.0,  # fraction of maze cell size for safety margin
         release_steps: int = 3,  # consecutive steps to release intervention
+        episode_intervention_prob: float = 1.0,
+        episode_intervention_prob_min: float = 0.0,
+        episode_intervention_prob_decay_steps: int = 0,
+        episode_intervention_prob_decay_start: int = 0,
+        episode_intervention_seed: Optional[int] = None,
     ):
         super().__init__(env)
 
@@ -97,6 +106,11 @@ class InterventionWrapper(gym.Wrapper):
         self.agent_mode = agent_mode
         self.safety_margin_frac = float(safety_margin_frac)
         self.release_steps = int(release_steps)
+        self.episode_intervention_prob = float(episode_intervention_prob)
+        self.episode_intervention_prob_min = float(episode_intervention_prob_min)
+        self.episode_intervention_prob_decay_steps = int(episode_intervention_prob_decay_steps)
+        self.episode_intervention_prob_decay_start = int(episode_intervention_prob_decay_start)
+        self._rng = np.random.default_rng(episode_intervention_seed)
         
 
         # Internal timers (human)
@@ -121,6 +135,14 @@ class InterventionWrapper(gym.Wrapper):
         self._last_distance: Optional[float] = None
         self._safety_align_active = False
         self._progress_active = False
+        self._episode_interventions_enabled = True
+
+    def _current_episode_prob(self) -> float:
+        if self.episode_intervention_prob_decay_steps <= 0:
+            return self.episode_intervention_prob
+        progress = max(0, self._global_step_env - self.episode_intervention_prob_decay_start)
+        frac = min(1.0, progress / float(self.episode_intervention_prob_decay_steps))
+        return self.episode_intervention_prob + (self.episode_intervention_prob_min - self.episode_intervention_prob) * frac
 
     # ---------------
     # Human utilities
@@ -275,6 +297,10 @@ class InterventionWrapper(gym.Wrapper):
         self._safety_align_active = False
         self._progress_active = False
         self._last_distance = self._goal_distance()
+        prob = float(np.clip(self._current_episode_prob(), 0.0, 1.0))
+        self._episode_interventions_enabled = bool(self._rng.random() < prob)
+        self._stats.episode_gate_enabled = 1 if self._episode_interventions_enabled else 0
+        self._stats.episode_gate_prob = prob
         return obs, info
 
     def step(self, policy_action: np.ndarray):
@@ -288,66 +314,69 @@ class InterventionWrapper(gym.Wrapper):
                 teacher_action = human
                 reason = 'human'
         else:  # agent mode
-            # Respect warmup schedule
-            if self._global_step_env < self.enable_after_steps:
+            if not self._episode_interventions_enabled:
                 teacher_action = None
             else:
-                teacher_action = self._teacher_action()
-            # Safety check
-            safety_violation = False
-            if self.hard_block_lethal and teacher_action is not None and policy_action is not None:
-                predicted = self._predict_next_xy(policy_action)
-                if predicted is not None and (not self._is_traversable_cell(predicted)):
-                    safety_violation = True
-            safety_margin = self._near_danger_margin()
-
-            if self.agent_mode == 'divergence':
-                diverged = False
-                if teacher_action is not None and policy_action is not None and not safety_violation:
-                    if self.tolerance_type == 'angle':
-                        ang = self._angle_deg(policy_action, teacher_action)
-                        diverged = ang > self.tolerance_value
-                    else:
-                        diverged = float(np.linalg.norm(policy_action - teacher_action)) > self.tolerance_value
-                if safety_violation:
-                    reason = 'safety'
-                elif diverged:
-                    reason = 'divergence'
-                else:
+                # Respect warmup schedule
+                if self._global_step_env < self.enable_after_steps:
                     teacher_action = None
-            elif self.agent_mode == 'safety_align':
-                aligned = False
-                if teacher_action is not None and policy_action is not None:
-                    if self.tolerance_type == 'angle':
-                        aligned = self._angle_deg(policy_action, teacher_action) <= self.tolerance_value
-                    else:
-                        aligned = float(np.linalg.norm(policy_action - teacher_action)) <= self.tolerance_value
-                if aligned:
-                    self._align_count += 1
                 else:
-                    self._align_count = 0
+                    teacher_action = self._teacher_action()
+                # Safety check
+                safety_violation = False
+                if self.hard_block_lethal and teacher_action is not None and policy_action is not None:
+                    predicted = self._predict_next_xy(policy_action)
+                    if predicted is not None and (not self._is_traversable_cell(predicted)):
+                        safety_violation = True
+                safety_margin = self._near_danger_margin()
 
-                if safety_violation or safety_margin:
-                    self._safety_align_active = True
-
-                if self._safety_align_active:
-                    if (not safety_violation and not safety_margin and self._align_count >= self.release_steps):
-                        self._safety_align_active = False
-                    else:
+                if self.agent_mode == 'divergence':
+                    diverged = False
+                    if teacher_action is not None and policy_action is not None and not safety_violation:
+                        if self.tolerance_type == 'angle':
+                            ang = self._angle_deg(policy_action, teacher_action)
+                            diverged = ang > self.tolerance_value
+                        else:
+                            diverged = float(np.linalg.norm(policy_action - teacher_action)) > self.tolerance_value
+                    if safety_violation:
                         reason = 'safety'
-                if not self._safety_align_active:
-                    teacher_action = None
-            else:  # safety_progress
-                if safety_violation or safety_margin or self._progress_violation:
-                    self._progress_active = True
-
-                if self._progress_active:
-                    if (not safety_violation and not safety_margin and self._progress_good_count >= self.release_steps):
-                        self._progress_active = False
+                    elif diverged:
+                        reason = 'divergence'
                     else:
-                        reason = 'safety' if (safety_violation or safety_margin) else 'progress'
-                if not self._progress_active:
-                    teacher_action = None
+                        teacher_action = None
+                elif self.agent_mode == 'safety_align':
+                    aligned = False
+                    if teacher_action is not None and policy_action is not None:
+                        if self.tolerance_type == 'angle':
+                            aligned = self._angle_deg(policy_action, teacher_action) <= self.tolerance_value
+                        else:
+                            aligned = float(np.linalg.norm(policy_action - teacher_action)) <= self.tolerance_value
+                    if aligned:
+                        self._align_count += 1
+                    else:
+                        self._align_count = 0
+
+                    if safety_violation or safety_margin:
+                        self._safety_align_active = True
+
+                    if self._safety_align_active:
+                        if (not safety_violation and not safety_margin and self._align_count >= self.release_steps):
+                            self._safety_align_active = False
+                        else:
+                            reason = 'safety'
+                    if not self._safety_align_active:
+                        teacher_action = None
+                else:  # safety_progress
+                    if safety_violation or safety_margin or self._progress_violation:
+                        self._progress_active = True
+
+                    if self._progress_active:
+                        if (not safety_violation and not safety_margin and self._progress_good_count >= self.release_steps):
+                            self._progress_active = False
+                        else:
+                            reason = 'safety' if (safety_violation or safety_margin) else 'progress'
+                    if not self._progress_active:
+                        teacher_action = None
 
         # Apply action
         intervened = teacher_action is not None
