@@ -177,9 +177,12 @@ class VectorizedOGBenchEnv(VecEnv):
         Returns:
             tuple: (observations, rewards, dones, extras)
         """
-        # Clip actions if specified
+        # Clip actions to max L2 norm if specified (avoid diagonal speedup)
         if self.clip_actions is not None:
-            actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
+            max_norm = float(self.clip_actions)
+            norms = torch.linalg.norm(actions, dim=-1, keepdim=True)
+            scale = torch.clamp(max_norm / (norms + 1e-8), max=1.0)
+            actions = actions * scale
         
         # Convert actions to numpy if needed
         if isinstance(actions, torch.Tensor):
@@ -197,6 +200,10 @@ class VectorizedOGBenchEnv(VecEnv):
             obs, reward, terminated, truncated, info = env.step(actions_np[i])
             done = bool(terminated or truncated)
             # Collect info before any reset
+            if isinstance(info, dict):
+                info = dict(info)
+                info['terminated'] = bool(terminated)
+                info['truncated'] = bool(truncated)
             infos_list.append(info)
             rewards_list.append(reward)
             dones_list.append(done)
@@ -254,6 +261,7 @@ class VectorizedOGBenchEnv(VecEnv):
         self._episode_length_buf[dones_tensor.bool()] = 0
         
         # Collect detailed metrics for completed episodes
+        timeouts = []
         for i, (done, info) in enumerate(zip(dones_array, infos_list)):
             if done and isinstance(info, dict):
                 # Detailed reward wrapper metrics (if available)
@@ -266,6 +274,10 @@ class VectorizedOGBenchEnv(VecEnv):
                 if 'distance_to_goal' in info:
                     distances.append(info['distance_to_goal'])
                 killed.append(info.get('killed', 0.0))
+                if 'truncated' in info:
+                    timeouts.append(1.0 if bool(info['truncated']) else 0.0)
+                else:
+                    timeouts.append(0.0)
                 if 'episode_avg_distance_to_subgoal' in info:
                     subgoal_avgs.append(info['episode_avg_distance_to_subgoal'])
                 if 'episode_subgoal_shaping_return' in info:
@@ -339,6 +351,8 @@ class VectorizedOGBenchEnv(VecEnv):
             extras['distances_to_goal'] = distances
             if killed:
                 extras['lethal_terminations'] = killed
+            if timeouts:
+                extras['timeouts'] = timeouts
             
             # Add RSL-RL compatible logging metrics using extras["log"] format
             # Following RSL-RL VecEnv documentation: keys start with "/" for namespacing
@@ -352,6 +366,8 @@ class VectorizedOGBenchEnv(VecEnv):
             extras['log']['/Episode/dense_reward'] = torch.tensor(dense_rewards, device=self.device)
             if killed:
                 extras['log']['/Episode/lethal'] = torch.tensor([float(k) for k in killed], device=self.device)
+            if timeouts:
+                extras['log']['/Episode/timeout'] = torch.tensor([float(t) for t in timeouts], device=self.device)
             if subgoal_avgs:
                 extras['log']['/Episode/avg_distance_to_subgoal'] = torch.tensor(subgoal_avgs, device=self.device)
             if subgoal_returns:
