@@ -136,6 +136,10 @@ class InterventionWrapper(gym.Wrapper):
         self._safety_align_active = False
         self._progress_active = False
         self._episode_interventions_enabled = True
+        self._oracle = None
+        self._oracle_type: Optional[str] = None
+        self._last_obs = None
+        self._last_info: Optional[dict] = None
 
     def _current_episode_prob(self) -> float:
         if self.episode_intervention_prob_decay_steps <= 0:
@@ -199,9 +203,14 @@ class InterventionWrapper(gym.Wrapper):
         except Exception:
             return None
 
-    def _teacher_action(self) -> Optional[np.ndarray]:
+    def _teacher_action(self, obs, info) -> Optional[np.ndarray]:
         if self.teacher_type == 'bfs':
             return self._bfs_teacher_action()
+        if self.teacher_type in {"cube_plan", "cube_markov"} and self._oracle is not None:
+            try:
+                return self._oracle.select_action(obs, info or {})
+            except Exception:
+                return None
         return None
 
     def _angle_deg(self, a: np.ndarray, b: np.ndarray) -> float:
@@ -287,6 +296,22 @@ class InterventionWrapper(gym.Wrapper):
     # --------------
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
+        self._last_obs = obs
+        self._last_info = info
+        if self.teacher_type in {"cube_plan", "cube_markov"}:
+            if self._oracle is None or self._oracle_type != self.teacher_type:
+                if self.teacher_type == "cube_plan":
+                    from ogbench.manipspace.oracles.plan.cube_plan import CubePlanOracle
+                    self._oracle = CubePlanOracle(self.unwrapped)
+                else:
+                    from ogbench.manipspace.oracles.markov.cube_markov import CubeMarkovOracle
+                    self._oracle = CubeMarkovOracle(self.unwrapped)
+                self._oracle_type = self.teacher_type
+            if self._oracle is not None:
+                try:
+                    self._oracle.reset(obs, info)
+                except Exception:
+                    pass
         # reset stats
         self._stats = _InterventionStats()
         # reset human timer
@@ -321,14 +346,16 @@ class InterventionWrapper(gym.Wrapper):
                 if self._global_step_env < self.enable_after_steps:
                     teacher_action = None
                 else:
-                    teacher_action = self._teacher_action()
-                # Safety check
+                    teacher_action = self._teacher_action(self._last_obs, self._last_info or {})
+                # Safety check (maze-only)
                 safety_violation = False
-                if self.hard_block_lethal and teacher_action is not None and policy_action is not None:
-                    predicted = self._predict_next_xy(policy_action)
-                    if predicted is not None and (not self._is_traversable_cell(predicted)):
-                        safety_violation = True
-                safety_margin = self._near_danger_margin()
+                safety_margin = False
+                if self.teacher_type == "bfs":
+                    if self.hard_block_lethal and teacher_action is not None and policy_action is not None:
+                        predicted = self._predict_next_xy(policy_action)
+                        if predicted is not None and (not self._is_traversable_cell(predicted)):
+                            safety_violation = True
+                    safety_margin = self._near_danger_margin()
 
                 if self.agent_mode == 'divergence':
                     diverged = False
@@ -382,6 +409,8 @@ class InterventionWrapper(gym.Wrapper):
         intervened = teacher_action is not None
         action_to_take = teacher_action if intervened else policy_action
         obs, reward, terminated, truncated, info = self.env.step(action_to_take)
+        self._last_obs = obs
+        self._last_info = info
 
         # Update progress tracking based on actual next state
         new_distance = self._goal_distance()
@@ -496,6 +525,8 @@ class DirectTeleopWrapper(gym.Wrapper):
         
         # Step the wrapped environment
         obs, reward, terminated, truncated, info = self.env.step(human_action)
+        self._last_obs = obs
+        self._last_info = info
 
         # Annotate info with action source
         info["human_action"] = human_action
