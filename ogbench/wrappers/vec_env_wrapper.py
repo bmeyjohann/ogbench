@@ -312,10 +312,24 @@ class VectorizedOGBenchEnv(VecEnv):
         student_actions = []
         teacher_actions = []
         teacher_intervened_mask = []
+        teacher_candidate_available = []
+        teacher_delta_l2 = []
+        teacher_delta_angle_deg = []
+        teacher_tolerance_value = []
+        teacher_target_block = []
+        teacher_cubes_solved = []
+        teacher_cube_max_target_error = []
         for i, info in enumerate(infos_list):
             info_dict = info if isinstance(info, dict) else {}
             teacher_intervened = bool(info_dict.get('teacher_intervened', False))
             teacher_intervened_mask.append(teacher_intervened)
+            teacher_candidate_available.append(1.0 if bool(info_dict.get('teacher_candidate_available', False)) else 0.0)
+            teacher_delta_l2.append(float(info_dict.get('teacher_delta_l2', 0.0)))
+            teacher_delta_angle_deg.append(float(info_dict.get('teacher_delta_angle_deg', 0.0)))
+            teacher_tolerance_value.append(float(info_dict.get('teacher_tolerance_value', 0.0)))
+            teacher_target_block.append(float(info_dict.get('diag/target_block_dynamic', info_dict.get('privileged/target_block', 0.0))))
+            teacher_cubes_solved.append(float(info_dict.get('diag/cubes_solved', 0.0)))
+            teacher_cube_max_target_error.append(float(info_dict.get('diag/cube_max_target_error', 0.0)))
 
             student_action = info_dict.get('student_action')
             if student_action is None:
@@ -337,6 +351,31 @@ class VectorizedOGBenchEnv(VecEnv):
             extras['student_actions'] = torch.tensor(np.stack(student_actions, axis=0), device=self.device, dtype=torch.float32)
             extras['teacher_actions'] = torch.tensor(np.stack(teacher_actions, axis=0), device=self.device, dtype=torch.float32)
             extras['teacher_intervened_mask'] = torch.tensor(teacher_intervened_mask, device=self.device, dtype=torch.bool)
+            if not extras.get('log'):
+                extras['log'] = {}
+            candidate_arr = np.asarray(teacher_candidate_available, dtype=np.float32)
+            extras['log']['/Teacher/diag_candidate_available'] = torch.tensor(candidate_arr, device=self.device, dtype=torch.float32)
+            extras['log']['/Teacher/diag_intervened_step'] = torch.tensor(
+                np.asarray(teacher_intervened_mask, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_delta_l2'] = torch.tensor(
+                np.asarray(teacher_delta_l2, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_delta_angle_deg'] = torch.tensor(
+                np.asarray(teacher_delta_angle_deg, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_tolerance_value'] = torch.tensor(
+                np.asarray(teacher_tolerance_value, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_target_block'] = torch.tensor(
+                np.asarray(teacher_target_block, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_cubes_solved'] = torch.tensor(
+                np.asarray(teacher_cubes_solved, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_cube_max_target_error'] = torch.tensor(
+                np.asarray(teacher_cube_max_target_error, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
         
         # Add episode completion metrics to extras
         if episode_rewards:

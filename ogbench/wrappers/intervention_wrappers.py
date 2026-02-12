@@ -138,6 +138,7 @@ class InterventionWrapper(gym.Wrapper):
         self._episode_interventions_enabled = True
         self._oracle = None
         self._oracle_type: Optional[str] = None
+        self._oracle_target_block: Optional[int] = None
         self._last_obs = None
         self._last_info: Optional[dict] = None
 
@@ -208,6 +209,23 @@ class InterventionWrapper(gym.Wrapper):
             return self._bfs_teacher_action()
         if self.teacher_type in {"cube_plan", "cube_markov"} and self._oracle is not None:
             try:
+                current_target_block = info.get('privileged/target_block') if isinstance(info, dict) else None
+                try:
+                    current_target_block = int(current_target_block)
+                except Exception:
+                    current_target_block = None
+
+                oracle_done = bool(getattr(self._oracle, 'done', False))
+                target_switched = (
+                    current_target_block is not None
+                    and self._oracle_target_block is not None
+                    and current_target_block != self._oracle_target_block
+                )
+                if oracle_done or target_switched:
+                    self._oracle.reset(obs, info or {})
+                    if current_target_block is not None:
+                        self._oracle_target_block = current_target_block
+
                 return self._oracle.select_action(obs, info or {})
             except Exception:
                 return None
@@ -310,6 +328,10 @@ class InterventionWrapper(gym.Wrapper):
             if self._oracle is not None:
                 try:
                     self._oracle.reset(obs, info)
+                    try:
+                        self._oracle_target_block = int(info.get('privileged/target_block'))
+                    except Exception:
+                        self._oracle_target_block = None
                 except Exception:
                     pass
         # reset stats
@@ -331,7 +353,11 @@ class InterventionWrapper(gym.Wrapper):
     def step(self, policy_action: np.ndarray):
         # Decide override
         teacher_action = None
+        teacher_candidate_action = None
         reason = None
+        teacher_delta_l2 = 0.0
+        teacher_delta_angle_deg = 0.0
+        teacher_candidate_available = False
 
         if self.mode == 'human':
             human = self._human_action()
@@ -347,6 +373,11 @@ class InterventionWrapper(gym.Wrapper):
                     teacher_action = None
                 else:
                     teacher_action = self._teacher_action(self._last_obs, self._last_info or {})
+                teacher_candidate_action = teacher_action
+                teacher_candidate_available = teacher_candidate_action is not None
+                if teacher_candidate_available and policy_action is not None:
+                    teacher_delta_l2 = float(np.linalg.norm(policy_action - teacher_candidate_action))
+                    teacher_delta_angle_deg = float(self._angle_deg(policy_action, teacher_candidate_action))
                 # Safety check (maze-only)
                 safety_violation = False
                 safety_margin = False
@@ -448,12 +479,18 @@ class InterventionWrapper(gym.Wrapper):
 
         # Annotate info
         info['teacher_intervened'] = bool(intervened)
+        info['teacher_candidate_available'] = bool(teacher_candidate_available)
+        info['teacher_delta_l2'] = float(teacher_delta_l2)
+        info['teacher_delta_angle_deg'] = float(teacher_delta_angle_deg)
+        info['teacher_tolerance_value'] = float(self.tolerance_value)
         if intervened:
             info['teacher_reason'] = reason
             info['teacher_action'] = np.array(teacher_action, dtype=np.float32)
             info['student_action'] = np.array(policy_action, dtype=np.float32)
         else:
             info['teacher_reason'] = None
+            if teacher_candidate_available and teacher_candidate_action is not None:
+                info['teacher_action'] = np.array(teacher_candidate_action, dtype=np.float32)
             info['student_action'] = np.array(policy_action, dtype=np.float32)
 
         # On episode end, flush metrics for logging
