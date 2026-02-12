@@ -97,9 +97,10 @@ class DetailedRewardWrapper(gym.RewardWrapper):
             agent_pos = obs[:2]
             goal_pos = obs[2:4]
         else:
-            # Fallback: use whatever we tracked last (may be zeros initially)
-            agent_pos = obs[:2] if isinstance(obs, np.ndarray) else np.zeros(2)
-            goal_pos = self._goal_pos if self._goal_pos is not None else np.zeros(2)
+            # Fallback for non-vector observations (e.g., pixels): reuse tracked positions.
+            # This avoids shape bugs such as slicing image tensors into pseudo "positions".
+            agent_pos = self._prev_agent_pos if self._prev_agent_pos is not None else np.zeros(2, dtype=np.float32)
+            goal_pos = self._goal_pos if self._goal_pos is not None else np.zeros(2, dtype=np.float32)
         
         return np.array(agent_pos, dtype=np.float32), np.array(goal_pos, dtype=np.float32)
 
