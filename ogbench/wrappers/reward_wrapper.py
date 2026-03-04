@@ -27,6 +27,7 @@ class DetailedRewardWrapper(gym.RewardWrapper):
                  dense_reward_scale=0.1,
                  goal_reward=1.0,
                  step_penalty=0.0,
+                 normalize_success_reward: bool = True,
                  # Subgoal shaping (reward-only) options
                  use_subgoal_shaping: bool = False,
                  subgoal_shaping_coef: float = 1.0,
@@ -51,6 +52,7 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         self.dense_reward_scale = dense_reward_scale
         self.goal_reward = goal_reward
         self.step_penalty = step_penalty
+        self.normalize_success_reward = bool(normalize_success_reward)
 
         # Subgoal shaping configuration
         self.use_subgoal_shaping = use_subgoal_shaping
@@ -290,9 +292,35 @@ class DetailedRewardWrapper(gym.RewardWrapper):
     def step(self, action):
         """Step with detailed reward tracking."""
         obs, reward, terminated, truncated, info = self.env.step(action)
+
+        # Some manipulation tasks expose episode completion via `success` while
+        # returning non-positive sparse rewards (e.g., {-N, ..., 0}). Mirror
+        # that signal into `goal_reached` so training/eval success metrics align.
+        success_flag = False
+        if isinstance(info, dict) and "success" in info:
+            raw_success = info.get("success", False)
+            if isinstance(raw_success, (np.ndarray, list, tuple)):
+                raw_arr = np.asarray(raw_success).reshape(-1)
+                success_flag = bool(raw_arr[0]) if raw_arr.size else False
+            else:
+                success_flag = bool(raw_success)
+            if success_flag:
+                self._goal_reached = True
         
         # Calculate detailed reward
         detailed_reward = self.reward(reward)
+
+        # Optional normalization for manipulation-style sparse rewards:
+        # convert sparse component from task-specific scale (e.g. -N..0) to 0/1.
+        if self.normalize_success_reward and isinstance(info, dict) and "success" in info:
+            effective_type = self._effective_reward_type()
+            if effective_type in ("sparse", "combined"):
+                binary_sparse = self.goal_reward if success_flag else 0.0
+                # reward() already accumulated the original sparse scalar.
+                self._episode_sparse_reward += float(binary_sparse - float(reward))
+                self._last_sparse_reward_step = float(binary_sparse)
+                dense_component = self._last_dense_reward_step if effective_type == "combined" else 0.0
+                detailed_reward = float(binary_sparse + dense_component - self.step_penalty)
         
         # Get current positions for metrics
         current_agent_pos = self._prev_agent_pos
@@ -317,13 +345,14 @@ class DetailedRewardWrapper(gym.RewardWrapper):
         # Update info with detailed metrics
         effective_type = self._effective_reward_type()
         info.update({
-            'sparse_reward': float(reward),  # Original reward
+            'sparse_reward': float(self._last_sparse_reward_step),
             'dense_reward': float(self._last_dense_reward_step),
             'total_reward': detailed_reward,
             'episode_sparse_reward': self._episode_sparse_reward,
             'episode_dense_reward': self._episode_dense_reward,
             'episode_steps': self._episode_steps,
             'goal_reached': self._goal_reached,
+            'goal_reached_from_success': bool(success_flag),
             'distance_to_goal': current_distance,
             'reward_type': effective_type,
         })

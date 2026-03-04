@@ -50,6 +50,8 @@ class VectorizedOGBenchEnv(VecEnv):
         self.wrappers = wrappers or []
         self.env_kwargs = dict(env_kwargs)
         self.clip_actions = clip_actions
+        self._render_mode = str(self.env_kwargs.get("render_mode", "") or "").lower()
+        self._passive_viewer_enabled = False
         
         # Create individual environments
         self.envs = []
@@ -111,6 +113,50 @@ class VectorizedOGBenchEnv(VecEnv):
         # Optionally reset all environments to initialize
         if auto_reset_on_init:
             self.reset()
+
+    def _maybe_launch_passive_viewer(self):
+        if self._passive_viewer_enabled:
+            return
+        if self._render_mode != "human":
+            return
+        if not self.envs:
+            return
+        base = self.envs[0].unwrapped
+        launch_fn = getattr(base, "launch_passive_viewer", None)
+        if not callable(launch_fn):
+            return
+        try:
+            launch_fn(show_left_ui=False, show_right_ui=False)
+            self._passive_viewer_enabled = True
+        except Exception:
+            self._passive_viewer_enabled = False
+
+    def _sync_passive_viewer(self):
+        if not self._passive_viewer_enabled:
+            return
+        if not self.envs:
+            return
+        base = self.envs[0].unwrapped
+        sync_fn = getattr(base, "sync_passive_viewer", None)
+        if not callable(sync_fn):
+            return
+        try:
+            sync_fn()
+        except Exception:
+            self._passive_viewer_enabled = False
+
+    def _close_passive_viewer(self):
+        if not self.envs:
+            self._passive_viewer_enabled = False
+            return
+        base = self.envs[0].unwrapped
+        close_fn = getattr(base, "close_passive_viewer", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
+        self._passive_viewer_enabled = False
     
     @property
     def episode_length_buf(self) -> torch.Tensor:
@@ -160,6 +206,7 @@ class VectorizedOGBenchEnv(VecEnv):
         
         # Reset episode length buffer
         self._episode_length_buf.zero_()
+        self._maybe_launch_passive_viewer()
         
         # Return TensorDict format for RSL-RL compatibility
         obs_tensordict = TensorDict(
@@ -245,6 +292,10 @@ class VectorizedOGBenchEnv(VecEnv):
         subgoal_avgs = []
         subgoal_returns = []
         subgoal_transitions = []
+        cube_solved_counts = []
+        cube_total_counts = []
+        cube_solved_fracs = []
+        cube_max_errors = []
         
         # First pass: collect episode completion data before any resets
         for i, (done, info) in enumerate(zip(dones_array, infos_list)):
@@ -284,6 +335,18 @@ class VectorizedOGBenchEnv(VecEnv):
                     subgoal_returns.append(info['episode_subgoal_shaping_return'])
                 if 'episode_subgoal_transitions' in info:
                     subgoal_transitions.append(info['episode_subgoal_transitions'])
+                if 'diag/cubes_solved' in info:
+                    cube_solved_counts.append(float(info['diag/cubes_solved']))
+                if 'diag/cubes_total' in info:
+                    cube_total_counts.append(float(info['diag/cubes_total']))
+                if 'diag/cubes_solved_fraction' in info:
+                    cube_solved_fracs.append(float(info['diag/cubes_solved_fraction']))
+                elif 'diag/cubes_solved' in info and 'diag/cubes_total' in info:
+                    total = float(info['diag/cubes_total'])
+                    if total > 0.0:
+                        cube_solved_fracs.append(float(info['diag/cubes_solved']) / total)
+                if 'diag/cube_max_target_error' in info:
+                    cube_max_errors.append(float(info['diag/cube_max_target_error']))
 
         # Aggregate teacher intervention metrics if provided by InterventionWrapper
         teacher_metrics = {
@@ -414,6 +477,28 @@ class VectorizedOGBenchEnv(VecEnv):
             if subgoal_transitions:
                 extras['log']['/Episode/subgoal_transitions'] = torch.tensor(subgoal_transitions, device=self.device)
 
+        if cube_solved_counts:
+            extras['episode_cubes_solved'] = cube_solved_counts
+        if cube_total_counts:
+            extras['episode_cubes_total'] = cube_total_counts
+        if cube_solved_fracs:
+            extras['episode_cubes_solved_fraction'] = cube_solved_fracs
+        if cube_max_errors:
+            extras['episode_cube_max_target_error'] = cube_max_errors
+        if cube_solved_counts or cube_total_counts or cube_solved_fracs or cube_max_errors:
+            if not extras.get('log'):
+                extras['log'] = {}
+            if cube_solved_counts:
+                extras['log']['/Episode/cubes_solved'] = torch.tensor(cube_solved_counts, device=self.device)
+            if cube_total_counts:
+                extras['log']['/Episode/cubes_total'] = torch.tensor(cube_total_counts, device=self.device)
+            if cube_solved_fracs:
+                extras['log']['/Episode/cubes_solved_fraction'] = torch.tensor(cube_solved_fracs, device=self.device)
+                # Alias to make panel naming obvious for intervention-progress tracking.
+                extras['log']['/Episode/subgoal_progress'] = torch.tensor(cube_solved_fracs, device=self.device)
+            if cube_max_errors:
+                extras['log']['/Episode/cube_max_target_error'] = torch.tensor(cube_max_errors, device=self.device)
+
         # Add teacher metrics to extras['log'] if any episodes completed with them
         if any(len(v) > 0 for v in teacher_metrics.values()):
             if not extras.get('log'):
@@ -432,11 +517,13 @@ class VectorizedOGBenchEnv(VecEnv):
             {"policy": obs_tensor},
             batch_size=[self.num_envs],
         )
+        self._sync_passive_viewer()
         
         return obs_tensordict, rewards_tensor, dones_tensor, extras
     
     def close(self):
         """Close all environments."""
+        self._close_passive_viewer()
         for env in self.envs:
             if hasattr(env, 'close'):
                 env.close()
