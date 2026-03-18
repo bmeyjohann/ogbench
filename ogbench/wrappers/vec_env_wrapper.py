@@ -378,6 +378,14 @@ class VectorizedOGBenchEnv(VecEnv):
         teacher_candidate_available = []
         teacher_delta_l2 = []
         teacher_delta_angle_deg = []
+        teacher_delta_xyz_l2 = []
+        teacher_delta_yaw_abs = []
+        teacher_delta_gripper_abs = []
+        teacher_component_threshold_xyz = []
+        teacher_component_threshold_yaw = []
+        teacher_component_threshold_gripper = []
+        teacher_component_threshold_scale = []
+        teacher_component_diverged_any = []
         teacher_tolerance_value = []
         teacher_target_block = []
         teacher_cubes_solved = []
@@ -389,6 +397,14 @@ class VectorizedOGBenchEnv(VecEnv):
             teacher_candidate_available.append(1.0 if bool(info_dict.get('teacher_candidate_available', False)) else 0.0)
             teacher_delta_l2.append(float(info_dict.get('teacher_delta_l2', 0.0)))
             teacher_delta_angle_deg.append(float(info_dict.get('teacher_delta_angle_deg', 0.0)))
+            teacher_delta_xyz_l2.append(float(info_dict.get('teacher_delta_xyz_l2', 0.0)))
+            teacher_delta_yaw_abs.append(float(info_dict.get('teacher_delta_yaw_abs', 0.0)))
+            teacher_delta_gripper_abs.append(float(info_dict.get('teacher_delta_gripper_abs', 0.0)))
+            teacher_component_threshold_xyz.append(float(info_dict.get('teacher_component_threshold_xyz', 0.0)))
+            teacher_component_threshold_yaw.append(float(info_dict.get('teacher_component_threshold_yaw', 0.0)))
+            teacher_component_threshold_gripper.append(float(info_dict.get('teacher_component_threshold_gripper', 0.0)))
+            teacher_component_threshold_scale.append(float(info_dict.get('teacher_component_threshold_scale', 1.0)))
+            teacher_component_diverged_any.append(float(info_dict.get('teacher_component_diverged_any', 0.0)))
             teacher_tolerance_value.append(float(info_dict.get('teacher_tolerance_value', 0.0)))
             teacher_target_block.append(float(info_dict.get('diag/target_block_dynamic', info_dict.get('privileged/target_block', 0.0))))
             teacher_cubes_solved.append(float(info_dict.get('diag/cubes_solved', 0.0)))
@@ -426,6 +442,30 @@ class VectorizedOGBenchEnv(VecEnv):
             )
             extras['log']['/Teacher/diag_delta_angle_deg'] = torch.tensor(
                 np.asarray(teacher_delta_angle_deg, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_delta_xyz_l2'] = torch.tensor(
+                np.asarray(teacher_delta_xyz_l2, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_delta_yaw_abs'] = torch.tensor(
+                np.asarray(teacher_delta_yaw_abs, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_delta_gripper_abs'] = torch.tensor(
+                np.asarray(teacher_delta_gripper_abs, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_component_threshold_xyz'] = torch.tensor(
+                np.asarray(teacher_component_threshold_xyz, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_component_threshold_yaw'] = torch.tensor(
+                np.asarray(teacher_component_threshold_yaw, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_component_threshold_gripper'] = torch.tensor(
+                np.asarray(teacher_component_threshold_gripper, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_component_threshold_scale'] = torch.tensor(
+                np.asarray(teacher_component_threshold_scale, dtype=np.float32), device=self.device, dtype=torch.float32
+            )
+            extras['log']['/Teacher/diag_component_diverged_any'] = torch.tensor(
+                np.asarray(teacher_component_diverged_any, dtype=np.float32), device=self.device, dtype=torch.float32
             )
             extras['log']['/Teacher/diag_tolerance_value'] = torch.tensor(
                 np.asarray(teacher_tolerance_value, dtype=np.float32), device=self.device, dtype=torch.float32
