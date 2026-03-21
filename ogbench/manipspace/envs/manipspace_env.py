@@ -109,6 +109,7 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         action_range = np.array([0.05, 0.05, 0.05, 0.3, 1.0])
         self.action_low = -action_range
         self.action_high = action_range
+        self._noop_action_threshold = 1e-6
 
         if self._mode == 'task':
             # Set task goals.
@@ -325,6 +326,7 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
 
         self._data.qpos[self._arm_joint_ids] = qpos_init
         mujoco.mj_forward(self._model, self._data)
+        self._sync_control_targets_to_state()
 
     def initialize_episode(self):
         pass
@@ -333,6 +335,9 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         pass
 
     def set_control(self, action):
+        action = np.asarray(action, dtype=np.float32)
+        if action.shape[0] >= 5 and np.max(np.abs(action[:5])) <= self._noop_action_threshold:
+            return
         action = self.unnormalize_action(action)
         a_pos, a_ori, a_gripper = action[:3], action[3], action[4]
 
@@ -381,6 +386,13 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         # Set the desired joint positions for the underlying PD controller.
         self._data.ctrl[self._arm_actuator_ids] = qpos_target
         self._data.ctrl[self._gripper_actuator_ids] = 255.0 * target_gripper_opening
+
+    def _current_gripper_opening(self) -> np.ndarray:
+        return np.array(np.clip([self._data.qpos[self._gripper_opening_joint_id] / 0.8], 0, 1))
+
+    def _sync_control_targets_to_state(self) -> None:
+        self._data.ctrl[self._arm_actuator_ids] = self._data.qpos[self._arm_joint_ids].copy()
+        self._data.ctrl[self._gripper_actuator_ids] = 255.0 * self._current_gripper_opening()
 
     def pre_step(self):
         self._prev_qpos = self._data.qpos.copy()
