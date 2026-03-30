@@ -254,8 +254,8 @@ class SceneEnv(ManipSpaceEnv):
             for i in range(self._num_cubes):
                 xy = self.np_random.uniform(*self._object_sampling_bounds)
                 obj_pos = (*xy, 0.02)
-                yaw = self.np_random.uniform(0, 2 * np.pi)
-                obj_ori = lie.SO3.from_z_radians(yaw).wxyz.tolist()
+                yaw = self._sample_planar_yaw()
+                obj_ori = self._quat_from_planar_yaw(yaw)
                 self._data.joint(f'object_joint_{i}').qpos[:3] = obj_pos
                 self._data.joint(f'object_joint_{i}').qpos[3:] = obj_ori
 
@@ -325,8 +325,8 @@ class SceneEnv(ManipSpaceEnv):
                 obj_pos = init_block_xyzs[i].copy()
                 obj_pos[:2] += self.np_random.uniform(-0.01, 0.01, size=2)
                 self._data.joint(f'object_joint_{i}').qpos[:3] = obj_pos
-                yaw = self.np_random.uniform(0, 2 * np.pi)
-                obj_ori = lie.SO3.from_z_radians(yaw).wxyz.tolist()
+                yaw = self._sample_planar_yaw()
+                obj_ori = self._quat_from_planar_yaw(yaw)
                 self._data.joint(f'object_joint_{i}').qpos[3:] = obj_ori
                 self._data.mocap_pos[self._cube_target_mocap_ids[i]] = goal_block_xyzs[i]
                 self._data.mocap_quat[self._cube_target_mocap_ids[i]] = lie.SO3.identity().wxyz.tolist()
@@ -430,8 +430,8 @@ class SceneEnv(ManipSpaceEnv):
                 xy = self.np_random.uniform(*self._target_sampling_bounds)
                 tar_pos = (*xy, 0.02)
             # Randomize target orientation.
-            yaw = self.np_random.uniform(0, 2 * np.pi)
-            tar_ori = lie.SO3.from_z_radians(yaw).wxyz.tolist()
+            yaw = self._sample_planar_yaw()
+            tar_ori = self._quat_from_planar_yaw(yaw)
 
             # Only show the target block.
             for i in range(self._num_cubes):
@@ -523,8 +523,8 @@ class SceneEnv(ManipSpaceEnv):
                 for i in range(self._num_cubes):
                     xy = self.np_random.uniform(*self._object_sampling_bounds)
                     obj_pos = (*xy, 0.02)
-                    yaw = self.np_random.uniform(0, 2 * np.pi)
-                    obj_ori = lie.SO3.from_z_radians(yaw).wxyz.tolist()
+                    yaw = self._sample_planar_yaw()
+                    obj_ori = self._quat_from_planar_yaw(yaw)
                     self._data.joint(f'object_joint_{i}').qpos[:3] = obj_pos
                     self._data.joint(f'object_joint_{i}').qpos[3:] = obj_ori
                     self._data.joint('object_joint_0').qvel[:] = 0.0

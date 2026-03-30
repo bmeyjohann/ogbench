@@ -25,6 +25,9 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         ob_type='states',
         physics_timestep=0.002,
         control_timestep=0.05,
+        disable_rotation=False,
+        hold_targets_on_zero_action=False,
+        noop_action_threshold=1e-6,
         terminate_at_goal=True,
         mode='task',
         visualize_info=True,
@@ -39,6 +42,8 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
             ob_type: Observation type. Either 'states' or 'pixels'.
             physics_timestep: Physics timestep.
             control_timestep: Control timestep.
+            disable_rotation: If True, lock planar yaw for the effector, cubes, and targets so the exposed control
+                interface can drop the rotation channel and operate in xyz + gripper only.
             terminate_at_goal: Whether to terminate the episode when the goal is reached.
             mode: Mode of the environment. Either 'task' or 'data_collection'. In 'task' mode, the environment is used
                 for training and evaluation. In 'data_collection' mode, the environment is used for collecting offline
@@ -88,6 +93,7 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         )
 
         self._ob_type = ob_type
+        self._disable_rotation = bool(disable_rotation)
         self._terminate_at_goal = terminate_at_goal
         self._mode = mode
         self._visualize_info = visualize_info
@@ -109,7 +115,8 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         action_range = np.array([0.05, 0.05, 0.05, 0.3, 1.0])
         self.action_low = -action_range
         self.action_high = action_range
-        self._noop_action_threshold = 1e-6
+        self._hold_targets_on_zero_action = bool(hold_targets_on_zero_action)
+        self._noop_action_threshold = float(noop_action_threshold)
 
         if self._mode == 'task':
             # Set task goals.
@@ -311,9 +318,12 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         # Sample initial effector position and orientation.
         eff_pos = self.np_random.uniform(*self._arm_sampling_bounds)
         cur_ori = self._effector_down_rotation
-        yaw = self.np_random.uniform(-np.pi, np.pi)
-        rotz = lie.SO3.from_z_radians(yaw)
-        eff_ori = rotz @ cur_ori
+        if self._disable_rotation:
+            eff_ori = cur_ori
+        else:
+            yaw = self.np_random.uniform(-np.pi, np.pi)
+            rotz = lie.SO3.from_z_radians(yaw)
+            eff_ori = rotz @ cur_ori
 
         # Solve for initial joint positions using IK.
         T_wp = lie.SE3.from_rotation_and_translation(eff_ori, eff_pos)
@@ -334,12 +344,33 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
     def set_new_target(self, return_info=True):
         pass
 
+    def _sample_planar_yaw(self, low: float = 0.0, high: float = 2 * np.pi) -> float:
+        if self._disable_rotation:
+            return 0.0
+        return float(self.np_random.uniform(low, high))
+
+    def _quat_from_planar_yaw(self, yaw: float) -> list[float]:
+        if self._disable_rotation:
+            return lie.SO3.identity().wxyz.tolist()
+        return lie.SO3.from_z_radians(float(yaw)).wxyz.tolist()
+
     def set_control(self, action):
         action = np.asarray(action, dtype=np.float32)
-        if action.shape[0] >= 5 and np.max(np.abs(action[:5])) <= self._noop_action_threshold:
-            return
+        arm_action_noop = False
+        gripper_action_noop = False
+        if self._hold_targets_on_zero_action:
+            arm_action_noop = action.shape[0] >= 4 and np.max(np.abs(action[:4])) <= self._noop_action_threshold
+            gripper_action_noop = action.shape[0] < 5 or abs(float(action[4])) <= self._noop_action_threshold
+            if arm_action_noop and gripper_action_noop:
+                return
         action = self.unnormalize_action(action)
         a_pos, a_ori, a_gripper = action[:3], action[3], action[4]
+
+        if self._hold_targets_on_zero_action and arm_action_noop:
+            gripper_opening = self._current_gripper_opening()
+            target_gripper_opening = np.clip(gripper_opening + a_gripper, 0.0, 1.0)
+            self._data.ctrl[self._gripper_actuator_ids] = 255.0 * target_gripper_opening
+            return
 
         # Compute target effector pose based on the relative action.
         effector_pos = self._data.site_xpos[self._pinch_site_id].copy()
@@ -348,11 +379,14 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
         ).compute_yaw_radians()
         gripper_opening = np.array(np.clip([self._data.qpos[self._gripper_opening_joint_id] / 0.8], 0, 1))
         target_effector_translation = effector_pos + a_pos
-        target_effector_orientation = (
-            lie.SO3.from_z_radians(a_ori)
-            @ lie.SO3.from_z_radians(effector_yaw)
-            @ self._effector_down_rotation.inverse()
-        )
+        if self._disable_rotation:
+            target_effector_orientation = self._effector_down_rotation
+        else:
+            target_effector_orientation = (
+                lie.SO3.from_z_radians(a_ori)
+                @ lie.SO3.from_z_radians(effector_yaw)
+                @ self._effector_down_rotation.inverse()
+            )
         target_gripper_opening = gripper_opening + a_gripper
 
         # Make sure the target pose respects the action limits.
@@ -361,12 +395,15 @@ class ManipSpaceEnv(CustomMuJoCoEnv):
             *self._workspace_bounds,
             out=target_effector_translation,
         )
-        yaw = np.clip(
-            target_effector_orientation.compute_yaw_radians(),
-            -np.pi,
-            +np.pi,
-        )
-        target_effector_orientation = lie.SO3.from_z_radians(yaw) @ self._effector_down_rotation
+        if self._disable_rotation:
+            target_effector_orientation = self._effector_down_rotation
+        else:
+            yaw = np.clip(
+                target_effector_orientation.compute_yaw_radians(),
+                -np.pi,
+                +np.pi,
+            )
+            target_effector_orientation = lie.SO3.from_z_radians(yaw) @ self._effector_down_rotation
         target_gripper_opening = np.clip(target_gripper_opening, 0.0, 1.0)
 
         # Pinch pose in the world frame -> attach pose in the world frame.
