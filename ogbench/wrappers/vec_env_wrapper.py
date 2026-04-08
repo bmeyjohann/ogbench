@@ -10,7 +10,20 @@ import numpy as np
 import gymnasium as gym
 import warnings
 from typing import Dict, Any, List, Callable, Optional
-from rsl_rl.env import VecEnv
+try:
+    from rsl_rl.env import VecEnv
+except Exception:
+    class VecEnv:  # type: ignore[no-redef]
+        """Minimal fallback base when rsl_rl is not installed.
+
+        The FastSAC/OGBench paths only rely on the concrete methods implemented
+        below, while PPO/RSL-RL users will still get the real base class when
+        the dependency is available.
+        """
+
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
 from tensordict import TensorDict
 try:
     import mujoco
