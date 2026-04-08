@@ -12,6 +12,10 @@ import warnings
 from typing import Dict, Any, List, Callable, Optional
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
+try:
+    import mujoco
+except Exception:
+    mujoco = None
 
 
 class VectorizedOGBenchEnv(VecEnv):
@@ -51,7 +55,17 @@ class VectorizedOGBenchEnv(VecEnv):
         self.env_kwargs = dict(env_kwargs)
         self.clip_actions = clip_actions
         self._render_mode = str(self.env_kwargs.get("render_mode", "") or "").lower()
+        self._visualize_intervention_colors = bool(self.env_kwargs.pop("visualize_intervention_colors", True))
         self._passive_viewer_enabled = False
+        self._passive_viewer_info: Optional[dict[str, Any]] = None
+        self._viewer_cached_model_ptr: Optional[int] = None
+        self._viewer_arm_material_ids: list[int] = []
+        self._viewer_gripper_material_ids: list[int] = []
+        self._viewer_original_rgba: dict[int, np.ndarray] = {}
+        self._viewer_last_visual_state: Optional[str] = None
+        self._viewer_visuals_disabled = False
+        self._viewer_visuals_warned = False
+        self._viewer_sync_warned = False
         
         # Create individual environments
         self.envs = []
@@ -141,8 +155,29 @@ class VectorizedOGBenchEnv(VecEnv):
         if not callable(sync_fn):
             return
         try:
+            if self._visualize_intervention_colors and not self._viewer_visuals_disabled:
+                try:
+                    self._apply_intervention_visuals()
+                except Exception as exc:
+                    self._viewer_visuals_disabled = True
+                    if not self._viewer_visuals_warned:
+                        print(
+                            f"[VecEnvViewer] intervention-color visuals failed; "
+                            f"disabling viewer tinting for this run: {exc}",
+                            flush=True,
+                        )
+                        self._viewer_visuals_warned = True
+                    try:
+                        self._restore_original_materials()
+                    except Exception:
+                        pass
+            else:
+                self._restore_original_materials()
             sync_fn()
-        except Exception:
+        except Exception as exc:
+            if not self._viewer_sync_warned:
+                print(f"[VecEnvViewer] passive viewer sync failed; disabling live viewer sync: {exc}", flush=True)
+                self._viewer_sync_warned = True
             self._passive_viewer_enabled = False
 
     def _close_passive_viewer(self):
@@ -153,10 +188,15 @@ class VectorizedOGBenchEnv(VecEnv):
         close_fn = getattr(base, "close_passive_viewer", None)
         if callable(close_fn):
             try:
+                self._restore_original_materials()
                 close_fn()
             except Exception:
                 pass
         self._passive_viewer_enabled = False
+        self._viewer_last_visual_state = None
+        self._viewer_visuals_disabled = False
+        self._viewer_visuals_warned = False
+        self._viewer_sync_warned = False
     
     @property
     def episode_length_buf(self) -> torch.Tensor:
@@ -206,6 +246,7 @@ class VectorizedOGBenchEnv(VecEnv):
         
         # Reset episode length buffer
         self._episode_length_buf.zero_()
+        self._passive_viewer_info = None
         self._maybe_launch_passive_viewer()
         
         # Return TensorDict format for RSL-RL compatibility
@@ -260,6 +301,11 @@ class VectorizedOGBenchEnv(VecEnv):
                 obs_list.append(obs_reset)
             else:
                 obs_list.append(obs)
+
+        if infos_list and isinstance(infos_list[0], dict):
+            self._passive_viewer_info = dict(infos_list[0])
+        else:
+            self._passive_viewer_info = None
         
         # Convert to arrays
         obs_array = np.stack(obs_list, axis=0)
@@ -370,7 +416,9 @@ class VectorizedOGBenchEnv(VecEnv):
         # Create extras dict following Isaac Lab's format
         extras = {"observations": self._current_obs_dict}
 
-        # Compute applied/student/teacher actions per env (teacher override if intervened, else student/policy action)
+        # Compute applied/student/teacher actions per env.
+        # Prefer the exact executed action forwarded by the inner intervention wrapper.
+        # Fall back to reconstruction only if older wrappers do not provide it.
         applied_actions = []
         student_actions = []
         teacher_actions = []
@@ -392,8 +440,6 @@ class VectorizedOGBenchEnv(VecEnv):
         teacher_cube_max_target_error = []
         for i, info in enumerate(infos_list):
             info_dict = info if isinstance(info, dict) else {}
-            teacher_intervened = bool(info_dict.get('teacher_intervened', False))
-            teacher_intervened_mask.append(teacher_intervened)
             teacher_candidate_available.append(1.0 if bool(info_dict.get('teacher_candidate_available', False)) else 0.0)
             teacher_delta_l2.append(float(info_dict.get('teacher_delta_l2', 0.0)))
             teacher_delta_angle_deg.append(float(info_dict.get('teacher_delta_angle_deg', 0.0)))
@@ -413,17 +459,29 @@ class VectorizedOGBenchEnv(VecEnv):
             student_action = info_dict.get('student_action')
             if student_action is None:
                 student_action = actions_np[i]
-            student_actions.append(np.asarray(student_action, dtype=np.float32))
+            student_action_arr = np.asarray(student_action, dtype=np.float32)
+            student_actions.append(student_action_arr)
 
             teacher_action = info_dict.get('teacher_action')
             if teacher_action is None:
                 teacher_action = student_action
-            teacher_actions.append(np.asarray(teacher_action, dtype=np.float32))
+            teacher_action_arr = np.asarray(teacher_action, dtype=np.float32)
+            teacher_actions.append(teacher_action_arr)
 
-            if teacher_intervened:
-                applied_actions.append(np.asarray(teacher_action, dtype=np.float32))
+            applied_action = info_dict.get('applied_action')
+            if applied_action is None:
+                applied_action_arr = teacher_action_arr if bool(info_dict.get('teacher_intervened', False)) else student_action_arr
             else:
-                applied_actions.append(np.asarray(student_action, dtype=np.float32))
+                applied_action_arr = np.asarray(applied_action, dtype=np.float32)
+            applied_actions.append(applied_action_arr)
+
+            teacher_intervened_raw = bool(info_dict.get('teacher_intervened', False))
+            try:
+                action_override = bool(np.abs(applied_action_arr - student_action_arr).sum() > 1e-6)
+            except Exception:
+                action_override = teacher_intervened_raw
+            teacher_intervened = bool(teacher_intervened_raw or action_override)
+            teacher_intervened_mask.append(teacher_intervened)
 
         if applied_actions:
             extras['applied_actions'] = torch.tensor(np.stack(applied_actions, axis=0), device=self.device, dtype=torch.float32)
@@ -560,6 +618,121 @@ class VectorizedOGBenchEnv(VecEnv):
         self._sync_passive_viewer()
         
         return obs_tensordict, rewards_tensor, dones_tensor, extras
+
+    def _apply_intervention_visuals(self) -> None:
+        if mujoco is None or not self.envs:
+            return
+        self._ensure_viewer_material_cache()
+        if not self._viewer_original_rgba:
+            return
+        visual_state = self._visual_state_from_info(self._passive_viewer_info)
+        if visual_state == self._viewer_last_visual_state:
+            return
+        if visual_state == "none":
+            self._restore_original_materials()
+            self._viewer_last_visual_state = visual_state
+            return
+        base = self.envs[0].unwrapped
+        model = getattr(base, "_model", None)
+        if model is None:
+            return
+        handle = getattr(base, "_passive_viewer_handle", None)
+        lock_ctx = handle.lock() if handle is not None else None
+        if lock_ctx is not None:
+            lock_ctx.__enter__()
+        try:
+            self._restore_original_rgba_in_place(model)
+            if visual_state == "gripper_only":
+                self._tint_materials(
+                    model,
+                    self._viewer_gripper_material_ids,
+                    np.array([1.00, 0.72, 0.18, 1.0], dtype=np.float32),
+                )
+            elif visual_state == "full":
+                self._tint_materials(
+                    model,
+                    self._viewer_arm_material_ids,
+                    np.array([0.95, 0.18, 0.18, 1.0], dtype=np.float32),
+                )
+                self._tint_materials(
+                    model,
+                    self._viewer_gripper_material_ids,
+                    np.array([1.00, 0.30, 0.30, 1.0], dtype=np.float32),
+                )
+        finally:
+            if lock_ctx is not None:
+                lock_ctx.__exit__(None, None, None)
+        self._viewer_last_visual_state = visual_state
+
+    def _ensure_viewer_material_cache(self) -> None:
+        if mujoco is None or not self.envs:
+            return
+        base = self.envs[0].unwrapped
+        model = getattr(base, "_model", None)
+        if model is None:
+            return
+        model_ptr = self._model_cache_key(model)
+        if self._viewer_cached_model_ptr == model_ptr and self._viewer_original_rgba:
+            return
+        self._viewer_cached_model_ptr = model_ptr
+        self._viewer_arm_material_ids = []
+        self._viewer_gripper_material_ids = []
+        self._viewer_original_rgba = {}
+        nmat = int(getattr(model, "nmat", 0))
+        for mat_id in range(nmat):
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MATERIAL, mat_id) or ""
+            self._viewer_original_rgba[mat_id] = np.asarray(model.mat_rgba[mat_id], dtype=np.float32).copy()
+            if name.startswith("ur5e/robotiq/") or "/robotiq/" in name:
+                self._viewer_gripper_material_ids.append(mat_id)
+            elif name.startswith("ur5e/"):
+                self._viewer_arm_material_ids.append(mat_id)
+        self._viewer_last_visual_state = None
+
+    @staticmethod
+    def _model_cache_key(model) -> int:
+        ptr = getattr(model, "ptr", None)
+        if ptr is not None:
+            try:
+                return int(ptr)
+            except Exception:
+                pass
+        return id(model)
+
+    def _restore_original_rgba_in_place(self, model) -> None:
+        for mat_id, rgba in self._viewer_original_rgba.items():
+            model.mat_rgba[mat_id] = rgba
+
+    def _restore_original_materials(self) -> None:
+        if mujoco is None or not self.envs or not self._viewer_original_rgba:
+            return
+        base = self.envs[0].unwrapped
+        model = getattr(base, "_model", None)
+        handle = getattr(base, "_passive_viewer_handle", None)
+        if model is None or handle is None:
+            return
+        with handle.lock():
+            self._restore_original_rgba_in_place(model)
+        self._viewer_last_visual_state = "none"
+
+    @staticmethod
+    def _tint_materials(model, material_ids: list[int], rgba: np.ndarray) -> None:
+        for mat_id in material_ids:
+            orig = np.asarray(model.mat_rgba[mat_id], dtype=np.float32).copy()
+            blended = 0.25 * orig + 0.75 * rgba
+            blended[3] = float(orig[3])
+            model.mat_rgba[mat_id] = blended
+
+    @staticmethod
+    def _visual_state_from_info(info: Optional[dict[str, Any]]) -> str:
+        if not isinstance(info, dict):
+            return "none"
+        if not bool(info.get("teacher_intervened", False)):
+            return "none"
+        reason = str(info.get("teacher_reason", "") or "")
+        component = str(info.get("teacher_reason_component", "") or "")
+        if reason in {"gripper", "gripper_lock", "gripper_sync"} or component == "gripper":
+            return "gripper_only"
+        return "full"
     
     def close(self):
         """Close all environments."""
@@ -599,6 +772,7 @@ class VectorizedOGBenchEnv(VecEnv):
             self.wrappers = wrappers
         if env_kwargs:
             self.env_kwargs = dict(env_kwargs)
+            self._visualize_intervention_colors = bool(self.env_kwargs.pop("visualize_intervention_colors", self._visualize_intervention_colors))
 
         self.envs = []
         detailed_wrappers: list[Any] = []
